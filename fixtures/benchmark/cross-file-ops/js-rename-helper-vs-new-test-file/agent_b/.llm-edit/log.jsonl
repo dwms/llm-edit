@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"tests.js","after_line_contains":"test suite placeholder"},"content":"test(\"formatDate returns ISO\", () => {\n  expect(formatDate(new Date(0))).toBe(\"1970-01-01T00:00:00.000Z\");\n});\n\ntest(\"formatDate handles now\", () => {\n  expect(typeof formatDate(new Date())).toBe(\"string\");\n});"}

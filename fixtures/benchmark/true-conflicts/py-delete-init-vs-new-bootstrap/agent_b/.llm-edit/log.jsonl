@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"boot.py","path":["module"]},"after":{"kind":"function_def","name":"shutdown"},"name":"bootstrap","source":"def bootstrap():\n    state = init_state()\n    state[\"ready\"] = True\n    return state\n"}

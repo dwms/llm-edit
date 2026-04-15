@@ -1,0 +1,2 @@
+{"op":"rename_symbol","scope":"module","file":"store.py","old":"get_item","new":"read_item","kinds":["identifier"]}
+{"op":"rename_symbol","scope":"module","file":"store.py","old":"put_item","new":"write_item","kinds":["identifier"]}

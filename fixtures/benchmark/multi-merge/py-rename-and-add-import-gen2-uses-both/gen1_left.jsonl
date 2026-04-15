@@ -1,0 +1,2 @@
+{"op":"rename_symbol","scope":"module","file":"proc.py","old":"collect","new":"snapshot","kinds":["identifier"]}
+{"op":"add_import","anchor":{"file":"proc.py"},"module":"json"}

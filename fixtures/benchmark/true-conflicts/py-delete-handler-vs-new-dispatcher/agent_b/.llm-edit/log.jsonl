@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"router.py","path":["module"]},"after":{"kind":"function_def","name":"handle_post"},"name":"dispatch","source":"def dispatch(req):\n    if req.method == \"GET\":\n        return handle_get(req)\n    if req.method == \"POST\":\n        return handle_post(req)\n    return None\n"}

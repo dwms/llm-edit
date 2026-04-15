@@ -1,0 +1,1 @@
+{"kind":"delete_vs_new_caller","file":"api.py","deleted":"old_get","caller":"adapter"}

@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"proc.py","path":["module"]},"after":{"kind":"function_def","name":"aggregate"},"name":"export","source":"def export():\n    data = collect()\n    return json.dumps(data)\n"}

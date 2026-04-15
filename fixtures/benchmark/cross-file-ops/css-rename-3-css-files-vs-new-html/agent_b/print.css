@@ -1,0 +1,5 @@
+@media print {
+  .tag {
+    border: 0;
+  }
+}

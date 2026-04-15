@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"signup.html","after_line_contains":"<input name=\"email\">"},"content":"      <input name=\"password\" type=\"password\">\n      <input name=\"confirm\" type=\"password\">"}

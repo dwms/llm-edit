@@ -1,0 +1,1 @@
+{"op":"insert_element","anchor":{"file":"dashboard.html","selector":"body"},"position":"last-child","html":"<button onclick=\"checkAuth(currentUser)\">Probe</button>"}

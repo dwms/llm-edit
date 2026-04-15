@@ -1,0 +1,2 @@
+{"op":"extract_function","source":{"file":"calc.py","path":["module",{"kind":"function_def","name":"total"},"body"]},"body_range":[0,1],"new_name":"_sum_loop","params":["items"],"returns":["s"]}
+{"op":"rename_symbol","scope":"module","file":"calc.py","old":"total","new":"sum_all","kinds":["identifier"]}

@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"svc.py","path":["module"]},"after":{"kind":"function_def","name":"shutdown"},"name":"retry_emit","source":"def retry_emit(payload):\n    for _ in range(3):\n        if emit(payload):\n            return True\n    return False\n"}

@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"orders.py","old":"place_order","new":"submit_order","kinds":["identifier"]}

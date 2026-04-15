@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"api.py","path":["module"]},"after":{"kind":"function_def","name":"stay"},"name":"adapter","source":"def adapter(k):\n    return old_get(k) or \"missing\"\n"}

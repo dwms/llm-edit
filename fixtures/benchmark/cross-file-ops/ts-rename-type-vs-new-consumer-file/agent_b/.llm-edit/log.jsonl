@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"consumers.ts","after_line_contains":"consumers of user factories"},"content":"export function guestConsumer() {\n  return makeUser(\"guest\");\n}\n\nexport function pairConsumer() {\n  return [makeUser(\"a\"), makeUser(\"b\")];\n}"}

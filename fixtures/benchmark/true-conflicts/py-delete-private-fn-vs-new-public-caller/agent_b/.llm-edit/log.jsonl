@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"lib.py","path":["module"]},"after":{"kind":"function_def","name":"public_api"},"name":"half_then","source":"def half_then(x, k):\n    base = _internal_step(x)\n    return base + k\n"}

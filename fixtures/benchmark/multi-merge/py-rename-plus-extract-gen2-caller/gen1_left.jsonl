@@ -1,0 +1,2 @@
+{"op":"rename_symbol","scope":"module","file":"svc.py","old":"fetch_data","new":"load_data","kinds":["identifier"]}
+{"op":"rename_symbol","scope":"module","file":"svc.py","old":"parse","new":"strip_raw","kinds":["identifier"]}

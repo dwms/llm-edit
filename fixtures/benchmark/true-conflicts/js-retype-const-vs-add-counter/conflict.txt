@@ -1,0 +1,1 @@
+{"kind":"retype_precondition_violated","file":"counter.js","variable":"n","from":"let","to":"const","invalidated_by":"new_reassignment"}

@@ -1,0 +1,2 @@
+{"op":"insert_element","anchor":{"file":"index.html","selector":"body"},"position":"last-child","html":"<button onclick=\"getUser(2)\">U2</button>"}
+{"op":"insert_element","anchor":{"file":"index.html","selector":"body"},"position":"last-child","html":"<button onclick=\"getOrder(2)\">O2</button>"}

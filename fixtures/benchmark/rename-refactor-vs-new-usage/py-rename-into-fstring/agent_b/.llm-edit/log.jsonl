@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"service.py","path":["module"]},"after":{"kind":"function_def","name":"restart_server"},"name":"supervise","source":"def supervise(host, port):\n    # wraps start_server with logging\n    print(f\"calling start_server({host}, {port})\")\n    start_server(host, port)\n"}

@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"proc.py","path":["module"]},"after":{"kind":"function_def","name":"run"},"name":"run_grouped","source":"def run_grouped(groups):\n    return {\n        key: [normalize(v) for v in (normalize(w) for w in items) if normalize(v)]\n        for key, items in groups.items()\n    }\n"}

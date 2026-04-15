@@ -1,0 +1,2 @@
+// background worker
+const QUEUE = [];

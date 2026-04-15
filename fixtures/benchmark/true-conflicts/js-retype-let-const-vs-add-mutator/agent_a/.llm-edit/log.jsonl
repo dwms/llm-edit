@@ -1,0 +1,1 @@
+{"op":"retype_binding","anchor":{"file":"box.js","variable":"inner"},"from":"let","to":"const","precondition":{"reassigned":false}}

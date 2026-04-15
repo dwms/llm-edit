@@ -1,0 +1,2 @@
+{"op":"add_function","anchor":{"file":"svc.py","path":["module"]},"after":{"kind":"function_def","name":"emit"},"name":"shutdown","source":"def shutdown():\n    return False\n"}
+{"op":"rename_symbol","scope":"module","file":"svc.py","old":"emit","new":"publish","kinds":["identifier"]}

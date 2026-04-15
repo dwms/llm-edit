@@ -1,0 +1,3 @@
+function buildCache() {
+  return newStore();
+}

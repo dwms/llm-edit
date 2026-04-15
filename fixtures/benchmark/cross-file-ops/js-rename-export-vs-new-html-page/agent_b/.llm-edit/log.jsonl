@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"settings.html","after_line_contains":"<body>"},"content":"    <button onclick=\"openPanel()\">Settings Open</button>\n    <button onclick=\"closePanel()\">Settings Close</button>"}

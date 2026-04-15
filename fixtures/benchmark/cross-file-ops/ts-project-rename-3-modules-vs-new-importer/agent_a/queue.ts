@@ -1,0 +1,3 @@
+function buildQueue() {
+  return newStore();
+}

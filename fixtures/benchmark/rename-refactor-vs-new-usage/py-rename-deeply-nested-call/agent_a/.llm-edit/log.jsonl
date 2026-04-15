@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"proc.py","old":"normalize","new":"canonicalize","kinds":["identifier"]}

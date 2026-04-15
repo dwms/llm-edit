@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"calc.py","path":["module"]},"after":{"kind":"function_def","name":"total"},"name":"avg","source":"def avg(items):\n    return total(items) / max(len(items), 1)\n"}

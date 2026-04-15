@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"project","old":"fetchUser","new":"loadUser"}

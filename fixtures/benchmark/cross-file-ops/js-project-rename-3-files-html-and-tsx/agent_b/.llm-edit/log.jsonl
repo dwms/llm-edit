@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"Banner.tsx","after_line_contains":"banner placeholder"},"content":"function Banner(props) {\n  return showToast(props.text);\n}"}

@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"service.py","old":"start_server","new":"boot_server","kinds":["identifier"]}

@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"registry.ts","after_line_contains":"registry of stores"},"content":"function registerAll() {\n  return [makeStore(), makeStore(), makeStore()];\n}"}

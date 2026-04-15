@@ -1,0 +1,2 @@
+def shutdown():
+    return None

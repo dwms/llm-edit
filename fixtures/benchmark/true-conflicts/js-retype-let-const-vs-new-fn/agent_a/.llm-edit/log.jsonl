@@ -1,0 +1,1 @@
+{"op":"retype_binding","anchor":{"file":"store.js","variable":"value"},"from":"let","to":"const","precondition":{"reassigned":false}}

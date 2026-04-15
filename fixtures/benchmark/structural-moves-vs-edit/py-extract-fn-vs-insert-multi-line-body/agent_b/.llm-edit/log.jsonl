@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"pipeline.py","after_line_contains":"x = it.value"},"content":"        print(\"item\", x)"}

@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"svc.py","path":["module"]},"after":{"kind":"function_def","name":"parse"},"name":"run","source":"def run(payload):\n    if not validate(payload):\n        return None\n    return parse(payload)\n"}

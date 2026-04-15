@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"store.py","path":["module"]},"after":{"kind":"function_def","name":"has_item"},"name":"size","source":"def size():\n    return 0\n"}

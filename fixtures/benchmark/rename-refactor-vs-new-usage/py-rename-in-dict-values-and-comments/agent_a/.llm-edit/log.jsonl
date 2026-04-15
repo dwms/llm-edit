@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"registry.py","old":"ping_host","new":"probe_host","kinds":["identifier"]}

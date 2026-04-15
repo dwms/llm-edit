@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"svc.py","path":["module"]},"after":{"kind":"function_def","name":"emit"},"name":"healthcheck","source":"def healthcheck():\n    return emit({\"ping\": 1})\n"}

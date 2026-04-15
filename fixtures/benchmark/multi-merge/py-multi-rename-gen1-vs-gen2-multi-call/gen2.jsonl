@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"store.py","path":["module"]},"after":{"kind":"function_def","name":"size"},"name":"copy_to","source":"def copy_to(dst, k):\n    v = get_item(k)\n    put_item(k, v)\n    return v\n"}
