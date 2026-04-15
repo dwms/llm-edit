@@ -104,7 +104,19 @@ pub fn merge_case(case: &Path) -> Result<MergeResult> {
         .into_iter()
         .map(|op| rewrite_b_op(op, &rewrites))
         .collect::<Result<Vec<_>>>()?;
-    apply_log(&mut tree, &ops_b_rewritten).context("apply rewritten B")?;
+
+    // Apply B's ops one at a time, skipping any op that is already a no-op
+    // against the current tree state. This handles convergent-edit cases
+    // where both agents issued the same logical change — A applied it,
+    // B's attempt would be a duplicate (add_import already there) or an
+    // error (delete_function: target gone, replace_in_anchor: old not
+    // found). The op is a "state-based idempotence skip", not a conflict.
+    for op in &ops_b_rewritten {
+        if op_is_noop_against(op, &tree)? {
+            continue;
+        }
+        apply_log(&mut tree, std::slice::from_ref(op)).context("apply rewritten B")?;
+    }
 
     Ok(MergeResult::Merged(tree))
 }
@@ -193,6 +205,56 @@ pub fn check_case(case: &Path) -> Result<Vec<String>> {
             "case has neither expected/ nor conflict.txt: {}",
             case.display()
         )])
+    }
+}
+
+/// Return true when `op` would be a no-op applied against `tree` — i.e.
+/// the change it intends is already present. This catches the
+/// convergent-edit case where A and B issued the same logical op: after
+/// A applies, B's op has nothing left to do and would otherwise error.
+///
+/// Conservative by design: only checks op shapes where "already applied"
+/// is unambiguous. Returns false for everything else so ops still run.
+fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
+    match op {
+        Op::AddImport { anchor, module } => {
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("add_import.anchor.file missing"))?;
+            let Some(text) = tree.get(&PathBuf::from(file)) else {
+                return Ok(false);
+            };
+            let needle = format!("import {}", module);
+            // line-exact (ignoring leading whitespace / trailing newline)
+            Ok(text.lines().any(|l| l.trim() == needle))
+        }
+        Op::DeleteFunction { anchor } => {
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("delete_function.anchor.file missing"))?;
+            let fn_name = extract_fn_name_from_path(anchor)?;
+            let Some(text) = tree.get(&PathBuf::from(file)) else {
+                return Ok(false);
+            };
+            let needle = format!("def {}(", fn_name);
+            Ok(!text.contains(&needle))
+        }
+        Op::ReplaceInAnchor { anchor, old, new } => {
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("replace_in_anchor.anchor.file missing"))?;
+            let Some(text) = tree.get(&PathBuf::from(file)) else {
+                return Ok(false);
+            };
+            // Already applied iff `old` absent from file AND `new` present.
+            // (Both checks are needed: absence alone could mean the
+            // anchor's content is simply not there at all.)
+            Ok(!text.contains(old.as_str()) && text.contains(new.as_str()))
+        }
+        _ => Ok(false),
     }
 }
 
