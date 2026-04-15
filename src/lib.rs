@@ -42,27 +42,23 @@ pub fn apply_log(tree: &mut Tree, ops: &[Op]) -> Result<()> {
 
 fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
     match op {
-        Op::RenameSymbol { scope, file, old, new, .. } => {
+        Op::RenameSymbol { scope, file, old, new, respect_shadowing, .. } => {
             match scope.as_str() {
                 "module" => {
                     let path = PathBuf::from(file);
                     let text = tree
                         .get_mut(&path)
                         .ok_or_else(|| anyhow!("no such file {}", file))?;
-                    *text = rename_in_source_file(text, &path, old, new);
+                    *text = rename_in_source_file(text, &path, old, new, *respect_shadowing);
                 }
                 "project" => {
                     for (path, text) in tree.iter_mut() {
                         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                         match ext {
                             "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => {
-                                *text = rename_in_source_file(text, path, old, new);
+                                *text = rename_in_source_file(text, path, old, new, *respect_shadowing);
                             }
                             "html" | "htm" => {
-                                // HTML is still textual — identifiers in event
-                                // handler values (`onclick="fn()"`) are the
-                                // common case; a stricter HTML AST pass is
-                                // tracked in #5.
                                 *text = rename_word_boundary(text, old, new);
                             }
                             _ => {}
@@ -303,11 +299,18 @@ fn is_ident_char(c: char) -> bool {
 /// Dispatch identifier rename to the right AST backend for a given
 /// source file. Unknown extensions fall back to textual word-boundary
 /// rewrite.
-fn rename_in_source_file(text: &str, path: &Path, old: &str, new: &str) -> String {
+fn rename_in_source_file(
+    text: &str,
+    path: &Path,
+    old: &str,
+    new: &str,
+    respect_shadowing: bool,
+) -> String {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     match ext {
-        "py" => py_ast_rename_identifier(text, old, new),
+        "py" => py_ast_rename_identifier_scoped(text, old, new, respect_shadowing),
         "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => {
+            // JS/TS scope-aware rename tracked on #6 follow-up.
             js_ts_ast_rename_identifier(text, ext, old, new)
         }
         "rs" => rust_ast_rename_identifier(text, old, new),
@@ -317,11 +320,27 @@ fn rename_in_source_file(text: &str, path: &Path, old: &str, new: &str) -> Strin
 
 /// AST-scoped rename for Python: rewrite every `identifier` node whose
 /// text equals `old` to `new`. String literal contents and comments are
-/// untouched because they are not identifier nodes.
+/// untouched because they are not identifier nodes. Backwards-compatible
+/// shape: ignores lexical shadowing (rewrites every match in the file).
 ///
-/// On parse failure the input is returned unchanged; callers relying on
-/// the rename should confirm the source is valid Python before invoking.
+/// Use `py_ast_rename_identifier_scoped` with `respect_shadowing=true`
+/// to skip identifiers inside functions whose parameter list rebinds
+/// the name.
 pub fn py_ast_rename_identifier(source: &str, old: &str, new: &str) -> String {
+    py_ast_rename_identifier_scoped(source, old, new, false)
+}
+
+/// Scope-aware Python rename. When `respect_shadowing` is true,
+/// `function_definition` nodes whose `parameters` declares a name
+/// matching `old` have their entire subtree skipped — the inner
+/// parameter declaration AND every body reference resolve to that
+/// inner binding (Python LEGB), so neither should be rewritten.
+pub fn py_ast_rename_identifier_scoped(
+    source: &str,
+    old: &str,
+    new: &str,
+    respect_shadowing: bool,
+) -> String {
     let mut parser = tree_sitter::Parser::new();
     if parser
         .set_language(&tree_sitter_python::LANGUAGE.into())
@@ -336,8 +355,11 @@ pub fn py_ast_rename_identifier(source: &str, old: &str, new: &str) -> String {
     let old_b = old.as_bytes();
 
     let mut hits: Vec<(usize, usize)> = Vec::new();
-    collect_identifier_hits(tree.root_node(), bytes, old_b, &mut hits);
-    // Splice in reverse so earlier byte indices stay valid.
+    if respect_shadowing {
+        collect_identifier_hits_scoped(tree.root_node(), bytes, old_b, &mut hits, false);
+    } else {
+        collect_identifier_hits(tree.root_node(), bytes, old_b, &mut hits);
+    }
     hits.sort_unstable();
     hits.dedup();
     let mut out = source.to_string();
@@ -347,12 +369,69 @@ pub fn py_ast_rename_identifier(source: &str, old: &str, new: &str) -> String {
     out
 }
 
+/// Scope-aware identifier walker (#6 MVP). Two-mode traversal:
+///
+/// - `in_target_scope = false`: we haven't yet entered the scope of
+///   the binding being renamed. Recurse normally, BUT if we find a
+///   `function_definition` whose parameter list declares `old`, that
+///   function IS the binding's outermost scope. Recurse into it with
+///   `in_target_scope = true` so we rewrite its parameter declaration
+///   and body uses.
+/// - `in_target_scope = true`: we are inside the target binding's
+///   scope. Rewrite identifier matches. If we encounter a nested
+///   `function_definition` that also declares `old` as a parameter,
+///   that nested function shadows our binding — skip its entire
+///   subtree.
+///
+/// Limits: only recognises function-parameter shadowing. for-loop /
+/// with-as / class / `nonlocal` rebindings, and module-level top
+/// assignments, aren't yet honored. See #6 for the full plan.
+fn collect_identifier_hits_scoped(
+    node: tree_sitter::Node,
+    source: &[u8],
+    old: &[u8],
+    hits: &mut Vec<(usize, usize)>,
+    in_target_scope: bool,
+) {
+    if node.kind() == "function_definition" && python_function_shadows(node, source, old) {
+        if in_target_scope {
+            // Nested fn that shadows our target binding — skip subtree.
+            return;
+        } else {
+            // Outermost fn introducing the target binding — descend with
+            // rename mode on so its parameter and body uses get rewritten.
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_identifier_hits_scoped(child, source, old, hits, true);
+            }
+            return;
+        }
+    }
+    if node.kind() == "identifier" {
+        if in_target_scope {
+            let s = node.start_byte();
+            let e = node.end_byte();
+            if &source[s..e] == old {
+                hits.push((s, e));
+            }
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_identifier_hits_scoped(child, source, old, hits, in_target_scope);
+    }
+}
+
 fn collect_identifier_hits(
     node: tree_sitter::Node,
     source: &[u8],
     old: &[u8],
     hits: &mut Vec<(usize, usize)>,
 ) {
+    // Default (non-scope-aware) walker: rewrites every identifier
+    // matching `old` regardless of which binding it refers to. The
+    // scope-aware variant is `collect_identifier_hits_scoped`.
     if node.kind() == "identifier" {
         let s = node.start_byte();
         let e = node.end_byte();
@@ -365,6 +444,44 @@ fn collect_identifier_hits(
     for child in node.children(&mut cursor) {
         collect_identifier_hits(child, source, old, hits);
     }
+}
+
+/// True iff `fn_node` (a `function_definition`) declares a parameter
+/// whose name matches `old`. Walks the `parameters` child; supports
+/// bare `identifier`, `typed_parameter`, `default_parameter`,
+/// `typed_default_parameter`, `list_splat_pattern` (*args), and
+/// `dictionary_splat_pattern` (**kwargs).
+fn python_function_shadows(
+    fn_node: tree_sitter::Node,
+    source: &[u8],
+    old: &[u8],
+) -> bool {
+    let Some(params) = fn_node.child_by_field_name("parameters") else {
+        return false;
+    };
+    let mut cursor = params.walk();
+    for child in params.children(&mut cursor) {
+        let name_node = match child.kind() {
+            "identifier" => Some(child),
+            "typed_parameter"
+            | "default_parameter"
+            | "typed_default_parameter"
+            | "list_splat_pattern"
+            | "dictionary_splat_pattern" => {
+                let mut c = child.walk();
+                child.children(&mut c).find(|n| n.kind() == "identifier")
+            }
+            _ => None,
+        };
+        if let Some(n) = name_node {
+            let s = n.start_byte();
+            let e = n.end_byte();
+            if &source[s..e] == old {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// AST-scoped rename for JavaScript / TypeScript (incl. JSX / TSX):

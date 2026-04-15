@@ -27,6 +27,15 @@ pub enum Op {
         new: String,
         #[serde(default)]
         kinds: Vec<String>,
+        /// When true, the renamer respects lexical shadowing: a nested
+        /// scope that re-binds `old` is left untouched. When false
+        /// (default, for backward compat with existing fixtures), every
+        /// identifier matching `old` is rewritten regardless of scope.
+        ///
+        /// Currently honored only by the Python AST renamer; JS/TS/Rust
+        /// always rewrite all matches. Tracked on #6.
+        #[serde(default)]
+        respect_shadowing: bool,
     },
     RenameCssClass {
         scope: String,

@@ -383,7 +383,7 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
             // anchor's content is simply not there at all.)
             Ok(!text.contains(old.as_str()) && text.contains(new.as_str()))
         }
-        Op::RenameSymbol { scope, file, old, .. } => {
+        Op::RenameSymbol { respect_shadowing: false, scope, file, old, .. } => {
             // Already applied iff the old name is no longer visible in the
             // scope the op would rewrite. The underlying applier is itself
             // idempotent (no-match → no-op), but declaring the skip here
@@ -562,12 +562,12 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     let mut out = Vec::new();
 
     for a in ops_a {
-        if let Op::RenameSymbol { scope: a_scope, file: a_file, old: a_old, new: a_new, .. } = a {
+        if let Op::RenameSymbol { respect_shadowing: false, scope: a_scope, file: a_file, old: a_old, new: a_new, .. } = a {
             if a_scope != "module" {
                 continue;
             }
             for b in ops_b {
-                if let Op::RenameSymbol { scope: b_scope, file: b_file, old: b_old, new: b_new, .. } = b {
+                if let Op::RenameSymbol { respect_shadowing: false, scope: b_scope, file: b_file, old: b_old, new: b_new, .. } = b {
                     if b_scope == "module" && a_file == b_file && a_old == b_old && a_new != b_new {
                         out.push(ConflictReport::RenameSymbolMismatch {
                             file: a_file.clone(),
@@ -833,7 +833,7 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     let check_rename_vs_delete =
         |rename_ops: &[Op], delete_ops: &[Op], out: &mut Vec<ConflictReport>| {
             for a in rename_ops {
-                if let Op::RenameSymbol {
+                if let Op::RenameSymbol { respect_shadowing: false,
                     scope,
                     file: r_file,
                     old,
@@ -974,14 +974,14 @@ fn collect_rewrites(ops: &[Op], base_tree: &Tree) -> Result<Rewrites> {
     let mut r = Rewrites::default();
     for op in ops {
         match op {
-            Op::RenameSymbol { scope, file, old, new, .. } if scope == "module" => {
+            Op::RenameSymbol { respect_shadowing: false, scope, file, old, new, .. } if scope == "module" => {
                 r.symbol_renames.push(SymbolRename {
                     file: file.clone(),
                     old: old.clone(),
                     new: new.clone(),
                 });
             }
-            Op::RenameSymbol { scope, old, new, .. } if scope == "project" => {
+            Op::RenameSymbol { respect_shadowing: false, scope, old, new, .. } if scope == "project" => {
                 r.project_symbol_renames.push((old.clone(), new.clone()));
             }
             Op::RenameCssClass { scope, old, new } if scope == "project" => {
@@ -1436,7 +1436,7 @@ mod idempotence_tests {
     #[test]
     fn rename_symbol_module_skipped_when_old_name_gone() {
         let tree = tree_of(&[("db.py", "def connect():\n    pass\n")]);
-        let op = Op::RenameSymbol {
+        let op = Op::RenameSymbol { respect_shadowing: false,
             scope: "module".into(),
             file: "db.py".into(),
             old: "get_conn".into(),
@@ -1449,7 +1449,7 @@ mod idempotence_tests {
     #[test]
     fn rename_symbol_module_applied_when_old_name_present() {
         let tree = tree_of(&[("db.py", "def get_conn():\n    pass\n")]);
-        let op = Op::RenameSymbol {
+        let op = Op::RenameSymbol { respect_shadowing: false,
             scope: "module".into(),
             file: "db.py".into(),
             old: "get_conn".into(),
