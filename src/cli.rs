@@ -327,17 +327,100 @@ fn infer_python_patterns(
         }
     }
 
+    // replace_in_anchor: for each function present in BOTH sides with a
+    // different body, see if the diff is a single contiguous substring
+    // change (common-prefix + common-suffix narrowing). When it is AND
+    // the substring is unique within the original body, emit a
+    // replace_in_anchor op. Multi-region body changes fall through —
+    // text-merge fallback handles them.
+    let before_by_name: HashMap<&str, &PyTopFn> =
+        before_fns.iter().map(|f| (f.name.as_str(), f)).collect();
+    let after_by_name: HashMap<&str, &PyTopFn> =
+        after_fns.iter().map(|f| (f.name.as_str(), f)).collect();
+    for (name, before_fn) in &before_by_name {
+        let Some(after_fn) = after_by_name.get(name) else {
+            continue;
+        };
+        if before_fn.body == after_fn.body {
+            continue;
+        }
+        if let Some((old, new)) = single_substring_diff(&before_fn.body, &after_fn.body) {
+            ops.push(serde_json::json!({
+                "op": "replace_in_anchor",
+                "anchor": {
+                    "file": rel,
+                    "path": [
+                        "module",
+                        {"kind": "function_def", "name": name},
+                        "body"
+                    ]
+                },
+                "old": old,
+                "new": new,
+            }));
+        }
+    }
+
     Ok(ops)
+}
+
+/// Find the (common-prefix, common-suffix) bracketed substring change
+/// between `before` and `after`. Returns `Some((old, new))` only when
+/// both substrings are non-empty AND `old` appears EXACTLY once in
+/// `before` (so the replace_in_anchor applier resolves it
+/// unambiguously). Returns `None` for pure additions, deletions,
+/// or ambiguous repeated-substring cases.
+fn single_substring_diff(before: &str, after: &str) -> Option<(String, String)> {
+    let p = char_common_prefix_len(before, after);
+    let s_max = before.len().min(after.len()) - p;
+    let s = char_common_suffix_len(&before[p..], &after[p..]).min(s_max);
+    let old = &before[p..before.len() - s];
+    let new = &after[p..after.len() - s];
+    if old.is_empty() || new.is_empty() {
+        return None;
+    }
+    if before.matches(old).count() != 1 {
+        return None;
+    }
+    Some((old.to_string(), new.to_string()))
+}
+
+fn char_common_prefix_len(a: &str, b: &str) -> usize {
+    let mut len = 0;
+    for (ca, cb) in a.chars().zip(b.chars()) {
+        if ca != cb {
+            break;
+        }
+        len += ca.len_utf8();
+    }
+    len
+}
+
+fn char_common_suffix_len(a: &str, b: &str) -> usize {
+    let mut len = 0;
+    for (ca, cb) in a.chars().rev().zip(b.chars().rev()) {
+        if ca != cb {
+            break;
+        }
+        len += ca.len_utf8();
+    }
+    len
 }
 
 #[derive(Debug)]
 struct PyTopFn {
     name: String,
+    /// Full `def NAME(args):\n    ...` source — what `add_function`'s
+    /// `source` field expects.
     source: String,
+    /// Just the function's body (the `block` node's text). Used by
+    /// replace_in_anchor inference.
+    body: String,
 }
 
 /// Walk the Python module's top-level statements; for each
-/// `function_definition`, capture its name and full source text.
+/// `function_definition`, capture its name, full source text, and
+/// just the body text.
 fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> {
     let mut out: Vec<PyTopFn> = Vec::new();
     let mut cursor = root.walk();
@@ -354,10 +437,9 @@ fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> 
             Ok(s) => s.to_string(),
             Err(_) => continue,
         };
-        let body = match std::str::from_utf8(&source[child.start_byte()..child.end_byte()]) {
+        let full_source = match std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+        {
             Ok(s) => {
-                // Ensure the source string ends in a newline — that's what
-                // the add_function applier expects.
                 if s.ends_with('\n') {
                     s.to_string()
                 } else {
@@ -366,7 +448,14 @@ fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> 
             }
             Err(_) => continue,
         };
-        out.push(PyTopFn { name, source: body });
+        let body = match child.child_by_field_name("body") {
+            Some(b) => match std::str::from_utf8(&source[b.start_byte()..b.end_byte()]) {
+                Ok(s) => s.to_string(),
+                Err(_) => String::new(),
+            },
+            None => String::new(),
+        };
+        out.push(PyTopFn { name, source: full_source, body });
     }
     out
 }

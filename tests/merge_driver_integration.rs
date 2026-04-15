@@ -389,3 +389,44 @@ fn git_rebase_replays_commits_with_op_propagation() {
         history_text
     );
 }
+
+/// `infer` derives a `replace_in_anchor` op for a single substring
+/// change inside a function body.
+#[test]
+fn infer_detects_replace_in_anchor() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    fs::write(
+        repo.join("calc.py"),
+        "def total(value):\n    return value * 2\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    // Edit the body: change the multiplier.
+    fs::write(
+        repo.join("calc.py"),
+        "def total(value):\n    return value * 3\n",
+    )
+    .unwrap();
+
+    run_llm_edit(&["infer"], repo);
+
+    let log = fs::read_to_string(repo.join(".llm-edit/log.jsonl")).unwrap();
+    assert!(
+        log.contains("\"op\":\"replace_in_anchor\""),
+        "missing replace_in_anchor:\n{}",
+        log
+    );
+    assert!(log.contains("\"old\":\"2\""), "wrong old:\n{}", log);
+    assert!(log.contains("\"new\":\"3\""), "wrong new:\n{}", log);
+    assert!(log.contains("\"name\":\"total\""), "wrong fn:\n{}", log);
+}
