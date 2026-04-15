@@ -1,24 +1,34 @@
 // Benchmark harness: run every case under `fixtures/benchmark/` through
 // both diff3 and llm-edit, bucket by top-level directory, print a table,
-// and exit 0 iff `(llm_edit_pct - diff3_pct) >= 0.80`.
+// and exit 0 iff `(llm_edit_pct - diff3_pct) >= 0.90`.
 //
 // Scoring rules (see BENCHMARK.md):
 //
-// Positive case (has `expected/`):
+// Single-merge positive (has `expected/`):
 //   - llm-edit CORRECT  iff merged tree equals `expected/` byte-exactly.
 //   - diff3    CORRECT  iff every file's `diff3 -m A base B` exits 0,
 //                       produces no <<<<<<< markers, and matches expected.
 //
-// Negative case (has `conflict.txt`):
+// Single-merge negative (has `conflict.txt`):
 //   - llm-edit CORRECT  iff emitted Conflicts matches conflict.txt
 //                       (order-independent JSON compare).
 //   - diff3    CORRECT  iff at least one file has <<<<<<< markers
 //                       (surrogate for "refused to silently resolve").
 //                       Silent-clean merges on a true-conflict case =
 //                       WRONG.
+//
+// Multi-merge (has `gen0/` + `gen1_left.jsonl` + `gen2.jsonl`):
+//   - llm-edit CORRECT  iff the persistence-enabled chained merge
+//                       produces a tree equal to `expected/` byte-exactly.
+//   - diff3    CORRECT  always false. Diff3 has no clean chained-merge
+//                       analog; scoring it as 0 is the intended outcome
+//                       for this bucket (and why persistence earns a
+//                       place in the bench at all).
 
 use anyhow::{Context, Result, anyhow};
-use llm_edit::merge_logic::{MergeResult, compare_conflicts, compare_tree, merge_case};
+use llm_edit::load_tree;
+use llm_edit::merge_logic::{MergeResult, compare_conflicts, compare_tree, merge_case, merge_trees_and_ops};
+use llm_edit::ops::{Op, parse_log};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -128,10 +138,24 @@ fn discover_cases(root: &Path) -> Vec<PathBuf> {
         let has_conflict = p.join("conflict.txt").is_file();
         if has_base && has_a && has_b && (has_expected || has_conflict) {
             out.push(p.to_path_buf());
+            continue;
+        }
+        // Multi-merge shape: gen0/ + gen1_*.jsonl + gen2.jsonl + expected/.
+        let has_gen0 = p.join("gen0").is_dir();
+        let has_gen1l = p.join("gen1_left.jsonl").is_file();
+        let has_gen2 = p.join("gen2.jsonl").is_file();
+        if has_gen0 && has_gen1l && has_gen2 && has_expected {
+            out.push(p.to_path_buf());
         }
     }
     out.sort();
     out
+}
+
+fn is_multi_merge_case(case: &Path) -> bool {
+    case.join("gen0").is_dir()
+        && case.join("gen1_left.jsonl").is_file()
+        && case.join("gen2.jsonl").is_file()
 }
 
 fn bucket_of(root: &Path, case: &Path) -> Option<String> {
@@ -143,6 +167,10 @@ fn bucket_of(root: &Path, case: &Path) -> Option<String> {
 
 /// Score one case; returns (diff3_correct, llm_edit_correct).
 fn score_case(case: &Path) -> Result<(bool, bool)> {
+    if is_multi_merge_case(case) {
+        let llm = score_llm_multi_merge(case).unwrap_or(false);
+        return Ok((false, llm));
+    }
     let is_positive = case.join("expected").is_dir();
     let is_negative = case.join("conflict.txt").is_file();
 
@@ -155,6 +183,29 @@ fn score_case(case: &Path) -> Result<(bool, bool)> {
         false
     };
     Ok((d3, llm))
+}
+
+/// Run the 2-generation chained merge with persistence and compare the
+/// final tree against `expected/`. Returns `Ok(true)` only on exact match.
+fn score_llm_multi_merge(case: &Path) -> Result<bool> {
+    let base = load_tree(&case.join("gen0"))?;
+    let log_a = parse_log(&fs::read_to_string(case.join("gen1_left.jsonl"))?)?;
+    let log_b = match fs::read_to_string(case.join("gen1_right.jsonl")) {
+        Ok(text) => parse_log(&text)?,
+        Err(_) => Vec::<Op>::new(),
+    };
+    let log_c = parse_log(&fs::read_to_string(case.join("gen2.jsonl"))?)?;
+
+    let (gen1_tree, gen1_log) = match merge_trees_and_ops(base, &log_a, &log_b)? {
+        MergeResult::Merged { tree, log } => (tree, log),
+        MergeResult::Conflicts(_) => return Ok(false),
+    };
+    let gen2_tree = match merge_trees_and_ops(gen1_tree, &gen1_log, &log_c)? {
+        MergeResult::Merged { tree, .. } => tree,
+        MergeResult::Conflicts(_) => return Ok(false),
+    };
+    let issues = compare_tree(&gen2_tree, &case.join("expected"))?;
+    Ok(issues.is_empty())
 }
 
 fn score_llm_edit(case: &Path, is_positive: bool) -> Result<bool> {
@@ -321,7 +372,7 @@ fn print_table(buckets: &BTreeMap<String, Tally>, total: &Tally) -> Result<bool>
     let d_pct = total.diff3_correct as f64 / total.total as f64;
     let l_pct = total.llm_correct as f64 / total.total as f64;
     let gap = l_pct - d_pct;
-    let pass = gap >= 0.80;
+    let pass = gap >= 0.90;
     let sign = if gap >= 0.0 { "+" } else { "-" };
     let badge = if pass { "\u{2705} PASS" } else { "\u{274C} FAIL" };
     println!(
