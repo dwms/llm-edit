@@ -292,6 +292,7 @@ fn rename_in_source_file(text: &str, path: &Path, old: &str, new: &str) -> Strin
         "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => {
             js_ts_ast_rename_identifier(text, ext, old, new)
         }
+        "rs" => rust_ast_rename_identifier(text, old, new),
         _ => rename_word_boundary(text, old, new),
     }
 }
@@ -391,6 +392,86 @@ pub fn js_ts_ast_rename_identifier(
         out.replace_range(*s..*e, new);
     }
     out
+}
+
+/// AST-scoped rename for Rust source. Walks tree-sitter-rust's
+/// identifier-kind nodes and rewrites only those — string literals,
+/// raw strings, char literals, and comments are separate node kinds
+/// in the grammar and are skipped by construction.
+pub fn rust_ast_rename_identifier(source: &str, old: &str, new: &str) -> String {
+    let mut parser = tree_sitter::Parser::new();
+    if parser
+        .set_language(&tree_sitter_rust::LANGUAGE.into())
+        .is_err()
+    {
+        return source.to_string();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return source.to_string();
+    };
+    let bytes = source.as_bytes();
+    let old_b = old.as_bytes();
+
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    collect_rust_identifier_hits(tree.root_node(), bytes, old_b, &mut hits);
+    hits.sort_unstable();
+    hits.dedup();
+    let mut out = source.to_string();
+    for (s, e) in hits.iter().rev() {
+        out.replace_range(*s..*e, new);
+    }
+    out
+}
+
+fn collect_rust_identifier_hits(
+    node: tree_sitter::Node,
+    source: &[u8],
+    old: &[u8],
+    hits: &mut Vec<(usize, usize)>,
+) {
+    let kind = node.kind();
+    // tree-sitter-rust identifier kinds: see grammar at
+    // https://github.com/tree-sitter/tree-sitter-rust. Strings
+    // (`string_literal`, `raw_string_literal`), char literals
+    // (`char_literal`), comments (`line_comment`, `block_comment`),
+    // and lifetimes (`lifetime`) are NOT identifier kinds and are
+    // skipped automatically.
+    let is_ident = matches!(
+        kind,
+        "identifier"
+            | "field_identifier"
+            | "type_identifier"
+            | "shorthand_field_identifier"
+            | "primitive_type"  // matches when renaming e.g. type aliases
+    );
+    // Don't recurse into string / comment subtrees — their internal
+    // node kinds may include identifier-shaped nodes (e.g. a macro
+    // invocation inside a doc comment example) and we don't want
+    // those clobbered.
+    let is_text_subtree = matches!(
+        kind,
+        "string_literal"
+            | "raw_string_literal"
+            | "char_literal"
+            | "line_comment"
+            | "block_comment"
+            | "doc_comment"
+    );
+    if is_text_subtree {
+        return;
+    }
+    if is_ident {
+        let s = node.start_byte();
+        let e = node.end_byte();
+        if &source[s..e] == old {
+            hits.push((s, e));
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_rust_identifier_hits(child, source, old, hits);
+    }
 }
 
 fn collect_js_identifier_hits(
