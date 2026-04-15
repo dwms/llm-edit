@@ -171,7 +171,7 @@ fn score_llm_edit(case: &Path, is_positive: bool) -> Result<bool> {
     if is_positive {
         let expected_dir = case.join("expected");
         match outcome {
-            MergeResult::Merged(tree) => {
+            MergeResult::Merged { tree, .. } => {
                 let issues = compare_tree(&tree, &expected_dir)?;
                 Ok(issues.is_empty())
             }
@@ -184,7 +184,7 @@ fn score_llm_edit(case: &Path, is_positive: bool) -> Result<bool> {
                 let issues = compare_conflicts(&c, &conflict_file)?;
                 Ok(issues.is_empty())
             }
-            MergeResult::Merged(_) => Ok(false),
+            MergeResult::Merged { .. } => Ok(false),
         }
     }
 }

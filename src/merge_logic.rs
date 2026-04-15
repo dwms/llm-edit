@@ -70,8 +70,20 @@ pub enum ConflictReport {
 }
 
 pub enum MergeResult {
-    Merged(Tree),
+    /// Successful merge: both the resulting tree AND the merged op log
+    /// (A's surviving ops followed by B's rewritten, non-idempotent ops).
+    /// The log is what enables persistence across multi-generation merges.
+    Merged { tree: Tree, log: Vec<Op> },
     Conflicts(Vec<ConflictReport>),
+}
+
+impl MergeResult {
+    pub fn tree(&self) -> Option<&Tree> {
+        match self {
+            MergeResult::Merged { tree, .. } => Some(tree),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Default, Debug)]
@@ -113,11 +125,27 @@ struct WrapEntry {
 /// both, and returns either the merged tree or a set of conflict reports.
 pub fn merge_case(case: &Path) -> Result<MergeResult> {
     let base = case.join("base");
-    let mut tree = load_tree(&base)?;
+    let tree = load_tree(&base)?;
     let log_a = std::fs::read_to_string(case.join("agent_a/.llm-edit/log.jsonl"))?;
     let log_b = std::fs::read_to_string(case.join("agent_b/.llm-edit/log.jsonl"))?;
     let ops_a = parse_log(&log_a)?;
     let ops_b = parse_log(&log_b)?;
+    merge_trees_and_ops(tree, &ops_a, &ops_b)
+}
+
+/// Core merge: takes a base tree and two agents' op-logs, returns a
+/// `MergeResult`. Called by `merge_case` and by multi-merge harnesses
+/// that chain merges without round-tripping through disk.
+pub fn merge_trees_and_ops(
+    tree: Tree,
+    ops_a: &[Op],
+    ops_b: &[Op],
+) -> Result<MergeResult> {
+    let mut tree = tree;
+    let ops_a_in = ops_a.to_vec();
+    let ops_b_in = ops_b.to_vec();
+    let ops_a = ops_a_in;
+    let ops_b = ops_b_in;
 
     let conflicts = detect_conflicts(&ops_a, &ops_b);
     if !conflicts.is_empty() {
@@ -132,7 +160,18 @@ pub fn merge_case(case: &Path) -> Result<MergeResult> {
         .filter(|op| !retype_invalidated_by_b(op, &b_reassigns))
         .collect();
 
-    apply_log(&mut tree, &ops_a).context("apply A")?;
+    // Apply A one op at a time, skipping any that is already a no-op
+    // against the current tree. This matters for multi-generation merges:
+    // `ops_a` may be the merged log from an earlier generation whose
+    // refactors are already present in the tree. We still want those ops
+    // in the `rewrites` record so that B's payloads get rewritten through
+    // them, but we must not re-apply them to the tree.
+    for op in &ops_a {
+        if op_is_noop_against(op, &tree)? {
+            continue;
+        }
+        apply_log(&mut tree, std::slice::from_ref(op)).context("apply A")?;
+    }
     let rewrites = collect_rewrites(&ops_a, &base_tree)?;
     let ops_b_rewritten: Vec<Op> = ops_b
         .into_iter()
@@ -145,14 +184,19 @@ pub fn merge_case(case: &Path) -> Result<MergeResult> {
     // B's attempt would be a duplicate (add_import already there) or an
     // error (delete_function: target gone, replace_in_anchor: old not
     // found). The op is a "state-based idempotence skip", not a conflict.
+    let mut applied_b: Vec<Op> = Vec::new();
     for op in &ops_b_rewritten {
         if op_is_noop_against(op, &tree)? {
             continue;
         }
         apply_log(&mut tree, std::slice::from_ref(op)).context("apply rewritten B")?;
+        applied_b.push(op.clone());
     }
 
-    Ok(MergeResult::Merged(tree))
+    let mut log = ops_a.clone();
+    log.extend(applied_b);
+
+    Ok(MergeResult::Merged { tree, log })
 }
 
 /// Compare the merged tree against `expected_dir`. Empty vec = match.
@@ -216,7 +260,7 @@ pub fn check_case(case: &Path) -> Result<Vec<String>> {
 
     if expected_dir.is_dir() {
         match outcome {
-            MergeResult::Merged(tree) => compare_tree(&tree, &expected_dir),
+            MergeResult::Merged { tree, .. } => compare_tree(&tree, &expected_dir),
             MergeResult::Conflicts(conflicts) => Ok(vec![format!(
                 "expected merged output, got {} conflict(s): {}",
                 conflicts.len(),
@@ -230,7 +274,7 @@ pub fn check_case(case: &Path) -> Result<Vec<String>> {
     } else if conflict_file.is_file() {
         match outcome {
             MergeResult::Conflicts(conflicts) => compare_conflicts(&conflicts, &conflict_file),
-            MergeResult::Merged(_) => Ok(vec![
+            MergeResult::Merged { .. } => Ok(vec![
                 "expected conflicts, got clean merge (merger missed the disagreement)".to_string(),
             ]),
         }

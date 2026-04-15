@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"app.py","path":["module"]},"after":{"kind":"function_def","name":"bar"},"name":"baz","source":"def baz(order_id):\n    return order_id * 2\n"}
