@@ -390,6 +390,205 @@ fn git_rebase_replays_commits_with_op_propagation() {
     );
 }
 
+/// `git-rebase --continue` after a text-fallback conflict: the user
+/// resolves the overlapping edit manually, then --continue finishes
+/// the rebase with the expected linear history.
+#[test]
+fn git_rebase_continue_after_text_conflict() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    // Base: a simple Python file with an empty op log.
+    fs::write(
+        repo.join("app.py"),
+        "def get():\n    return 1\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    // feat: unrecorded edit — change return value to 20.
+    run("git", &["checkout", "-b", "feat", "-q"], repo);
+    fs::write(repo.join("app.py"), "def get():\n    return 20\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "feat: bump return"], repo);
+
+    // main: unrecorded edit on the SAME line — change return value to 10.
+    run("git", &["checkout", "main", "-q"], repo);
+    fs::write(repo.join("app.py"), "def get():\n    return 10\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "main: different bump"], repo);
+
+    // Start rebase of feat onto main — overlapping edits -> text conflict.
+    run("git", &["checkout", "feat", "-q"], repo);
+    let bin = env!("CARGO_BIN_EXE_llm-edit");
+    let out = Command::new(bin)
+        .args(["git-rebase", "main"])
+        .current_dir(repo)
+        .output()
+        .expect("spawn");
+    // Expect exit code 1 — conflict.
+    assert!(
+        !out.status.success(),
+        "rebase was expected to conflict, stdout: {} stderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    // State file should exist.
+    let state_path = repo.join(".git/llm-edit-rebase/state.json");
+    assert!(state_path.exists(), "state file missing after conflict");
+
+    // Working tree should contain diff3 output — we just check for the
+    // conflict marker so we know the conflicted file was materialized.
+    let conflicted = fs::read_to_string(repo.join("app.py")).unwrap();
+    assert!(
+        conflicted.contains("<<<<<<<"),
+        "working tree not populated with diff3 output:\n{}",
+        conflicted,
+    );
+
+    // User resolves: pick feat's value (20).
+    fs::write(repo.join("app.py"), "def get():\n    return 20\n").unwrap();
+
+    // --continue
+    run_llm_edit(&["git-rebase", "--continue"], repo);
+
+    // State file gone.
+    assert!(!state_path.exists(), "state file not cleaned up after continue");
+
+    // HEAD on feat, app.py resolved.
+    let branch = Command::new("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(branch.stdout).unwrap().trim(),
+        "feat",
+        "HEAD not reattached to feat"
+    );
+    let app = fs::read_to_string(repo.join("app.py")).unwrap();
+    assert_eq!(app, "def get():\n    return 20\n");
+
+    // Linear history: feat's commit on top of main's.
+    let history = Command::new("git")
+        .args(["log", "--format=%s", "feat"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    let subjects: Vec<String> = String::from_utf8(history.stdout)
+        .unwrap()
+        .lines()
+        .map(|l| l.to_string())
+        .collect();
+    assert_eq!(
+        subjects,
+        vec!["feat: bump return", "main: different bump", "base"],
+        "wrong history after --continue",
+    );
+}
+
+/// `git-rebase --abort` after a text-fallback conflict: original branch
+/// is restored to its pre-rebase tip and HEAD is re-attached to it.
+#[test]
+fn git_rebase_abort_restores_original() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    fs::write(
+        repo.join("app.py"),
+        "def get():\n    return 1\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    run("git", &["checkout", "-b", "feat", "-q"], repo);
+    fs::write(repo.join("app.py"), "def get():\n    return 20\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "feat: bump return"], repo);
+
+    run("git", &["checkout", "main", "-q"], repo);
+    fs::write(repo.join("app.py"), "def get():\n    return 10\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "main: different bump"], repo);
+
+    run("git", &["checkout", "feat", "-q"], repo);
+    let feat_sha_before = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "feat"])
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+
+    // Trigger conflict.
+    let bin = env!("CARGO_BIN_EXE_llm-edit");
+    let out = Command::new(bin)
+        .args(["git-rebase", "main"])
+        .current_dir(repo)
+        .output()
+        .expect("spawn");
+    assert!(!out.status.success(), "rebase should have conflicted");
+    assert!(repo.join(".git/llm-edit-rebase/state.json").exists());
+
+    // Abort.
+    run_llm_edit(&["git-rebase", "--abort"], repo);
+
+    // State gone.
+    assert!(!repo.join(".git/llm-edit-rebase/state.json").exists());
+
+    // feat branch ref restored.
+    let feat_sha_after = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "feat"])
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_string();
+    assert_eq!(
+        feat_sha_before, feat_sha_after,
+        "feat branch ref not restored to pre-rebase SHA"
+    );
+
+    // HEAD re-attached to feat.
+    let branch = Command::new("git")
+        .args(["symbolic-ref", "--short", "HEAD"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(branch.stdout).unwrap().trim(),
+        "feat",
+        "HEAD not re-attached to feat after abort"
+    );
+
+    // Working tree back to feat's content.
+    let app = fs::read_to_string(repo.join("app.py")).unwrap();
+    assert_eq!(app, "def get():\n    return 20\n");
+}
+
 /// `infer` derives a `replace_in_anchor` op for a single substring
 /// change inside a function body.
 #[test]
