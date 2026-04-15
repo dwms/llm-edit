@@ -311,6 +311,35 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
 /// `ERROR` node anywhere in the tree returns false — a signal that
 /// text-merge fallback produced syntactically broken output and the
 /// file should be flagged as a conflict instead of silently shipped.
+/// 3-way text merge via `diff3 -m`. Tmpfiles for inputs; output is
+/// the merged string (possibly containing conflict markers).
+fn diff3_merge_strings(ours: &str, base: &str, theirs: &str) -> Result<String> {
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.subsec_nanos())
+        .unwrap_or(0);
+    let tag = format!("llm-edit-{}-{}", pid, nanos);
+    let ours_p = dir.join(format!("{}-ours", tag));
+    let base_p = dir.join(format!("{}-base", tag));
+    let theirs_p = dir.join(format!("{}-theirs", tag));
+    std::fs::write(&ours_p, ours)?;
+    std::fs::write(&base_p, base)?;
+    std::fs::write(&theirs_p, theirs)?;
+    let out = Command::new("diff3")
+        .arg("-m")
+        .arg(&ours_p)
+        .arg(&base_p)
+        .arg(&theirs_p)
+        .output()
+        .context("spawn diff3")?;
+    let _ = std::fs::remove_file(&ours_p);
+    let _ = std::fs::remove_file(&base_p);
+    let _ = std::fs::remove_file(&theirs_p);
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 fn parses_cleanly(path: &Path, text: &str) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let lang: tree_sitter::Language = match ext {
@@ -318,6 +347,7 @@ fn parses_cleanly(path: &Path, text: &str) -> bool {
         "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
         "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "rs" => tree_sitter_rust::LANGUAGE.into(),
         _ => return true,
     };
     let mut parser = tree_sitter::Parser::new();
@@ -521,9 +551,20 @@ mod parse_check_tests {
     }
 
     #[test]
-    fn rust_unsupported_passes() {
-        // Rust isn't in the supported set; we can't validate.
-        assert!(parses_cleanly(Path::new("lib.rs"), "fn x( {"));
+    fn rust_clean() {
+        assert!(parses_cleanly(
+            Path::new("lib.rs"),
+            "fn x() -> i32 { 1 }\n"
+        ));
+    }
+
+    #[test]
+    fn rust_unbalanced_brace_caught() {
+        // Closely modelled on the dogfood failure: a `}` got dropped
+        // by text-merge fallback in src/cli.rs and the build broke.
+        // With Rust now in the supported set this would have flagged.
+        let broken = "fn x() {\n    if cond {\n        return 1;\n    \n";
+        assert!(!parses_cleanly(Path::new("foo.rs"), broken));
     }
 
     #[test]
