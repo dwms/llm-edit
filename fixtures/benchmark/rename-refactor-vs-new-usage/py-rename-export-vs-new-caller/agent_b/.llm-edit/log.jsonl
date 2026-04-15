@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"format.py","path":["module"]},"after":{"kind":"function_def","name":"render_line"},"name":"render_total","source":"def render_total(items):\n    total = sum(i.price for i in items)\n    return \"Total: \" + format_money(total)\n"}

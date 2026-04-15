@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"repo.ts","after_line_contains":"return null;"},"content":"}\n\nexport function list(): UserRecord[] {\n  return [];"}

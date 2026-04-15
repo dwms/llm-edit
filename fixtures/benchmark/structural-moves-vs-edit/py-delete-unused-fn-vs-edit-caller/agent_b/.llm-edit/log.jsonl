@@ -1,0 +1,1 @@
+{"op":"replace_in_anchor","anchor":{"file":"svc.py","path":["module",{"kind":"function_def","name":"current"},"body"]},"old":"x + 1","new":"x + 2"}

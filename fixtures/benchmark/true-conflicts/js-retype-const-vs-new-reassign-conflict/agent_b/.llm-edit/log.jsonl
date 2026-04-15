@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"acc.js","after_line_contains":"read: () => total,"},"content":"    add: (n) => { total = total + n; },","reassigns":["total"]}

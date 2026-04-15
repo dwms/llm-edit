@@ -1,0 +1,2 @@
+{"op":"add_import","anchor":{"file":"pipeline.py"},"module":"enum"}
+{"op":"add_import","anchor":{"file":"pipeline.py"},"module":"functools"}

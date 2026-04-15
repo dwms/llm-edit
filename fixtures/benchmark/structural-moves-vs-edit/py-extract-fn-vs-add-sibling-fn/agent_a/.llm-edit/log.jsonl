@@ -1,0 +1,1 @@
+{"op":"extract_function","source":{"file":"parser.py","path":["module",{"kind":"function_def","name":"parse"},"body"]},"body_range":[0,1],"new_name":"_uppercase_all","params":["tokens"],"returns":["result"]}

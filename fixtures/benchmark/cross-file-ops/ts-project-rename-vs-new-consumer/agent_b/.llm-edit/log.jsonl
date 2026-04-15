@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"nav.ts","after_line_contains":"? [\"home\", \"profile\"]"},"content":"}\n\nexport function showAdminLink() {\n  return isLoggedIn() && globalThis.isAdmin;"}

@@ -1,0 +1,1 @@
+{"op":"replace_in_anchor","anchor":{"file":"step.py","path":["module",{"kind":"function_def","name":"step"},"body"]},"old":"y = x + 1\n    return y * 2","new":"return (x + 1) * 2"}

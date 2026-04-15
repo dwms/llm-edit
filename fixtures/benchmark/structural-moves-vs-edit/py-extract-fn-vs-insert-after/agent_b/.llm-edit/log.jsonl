@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"reporting.py","after_line_contains":"active.append(u)"},"content":"            print(u.id)"}

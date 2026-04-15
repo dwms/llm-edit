@@ -1,0 +1,1 @@
+{"op":"add_rule","anchor":{"file":"promo.css"},"selector":".banner.sale","declarations":[{"prop":"color","value":"red"}]}

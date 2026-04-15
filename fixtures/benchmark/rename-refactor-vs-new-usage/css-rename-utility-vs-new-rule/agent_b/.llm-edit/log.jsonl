@@ -1,0 +1,1 @@
+{"op":"add_rule","anchor":{"file":"buttons.css"},"selector":".action:disabled","declarations":[{"prop":"opacity","value":"0.5"}]}

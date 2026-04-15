@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"config.py","old":"DEFAULT_TIMEOUT","new":"TIMEOUT_SECONDS","kinds":["identifier"]}

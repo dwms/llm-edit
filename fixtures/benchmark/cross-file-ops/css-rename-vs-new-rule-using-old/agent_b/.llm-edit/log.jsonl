@@ -1,0 +1,1 @@
+{"op":"add_rule","anchor":{"file":"theme.css"},"selector":".widget.featured","declarations":[{"prop":"border","value":"2px solid gold"}]}

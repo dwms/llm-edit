@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"format.py","old":"format_money","new":"format_currency","kinds":["identifier"]}

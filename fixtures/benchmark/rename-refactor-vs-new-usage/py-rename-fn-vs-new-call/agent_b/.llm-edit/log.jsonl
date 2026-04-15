@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"math.py","path":["module"]},"after":{"kind":"function_def","name":"hypot"},"name":"magnitude","source":"def magnitude(v):\n    return square_root(v.x * v.x + v.y * v.y + v.z * v.z)\n"}

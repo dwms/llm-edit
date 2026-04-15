@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"db.py","old":"get_conn","new":"connect","kinds":["identifier"]}

@@ -1,0 +1,1 @@
+{"kind":"insert_anchor_deleted","file":"step.py","fn":"step","b_anchor_line":"y = x + 1","deleted_by":"replace_in_anchor"}

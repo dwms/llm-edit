@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"api.py","old":"retries","new":"max_attempts","kinds":["parameter","identifier"]}

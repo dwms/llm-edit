@@ -1,0 +1,1 @@
+{"op":"replace_in_anchor","anchor":{"file":"calc.py","path":["module",{"kind":"function_def","name":"total"},"body"]},"old":"i.price for i in items","new":"i.price * (1 - i.discount) for i in items"}

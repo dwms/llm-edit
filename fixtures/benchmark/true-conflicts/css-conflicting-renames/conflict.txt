@@ -1,0 +1,1 @@
+{"kind":"rename_css_class_mismatch","old":"box","a_new":"container","b_new":"panel"}

@@ -1,0 +1,1 @@
+{"op":"extract_function","source":{"file":"reporting.py","path":["module",{"kind":"function_def","name":"report"},"body"]},"body_range":[0,1],"new_name":"_active_users","params":["users"],"returns":["active"]}

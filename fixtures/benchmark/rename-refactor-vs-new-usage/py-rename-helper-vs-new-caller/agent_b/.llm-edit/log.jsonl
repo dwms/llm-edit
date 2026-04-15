@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"billing.py","path":["module"]},"after":{"kind":"function_def","name":"invoice_line"},"name":"quote_total","source":"def quote_total(items, rate):\n    subtotal = sum(i.price for i in items)\n    tax = compute_tax(subtotal, rate)\n    return subtotal + tax\n"}

@@ -1,0 +1,7 @@
+.widget {
+  padding: 8px;
+}
+
+.widget.featured {
+  border: 2px solid gold;
+}

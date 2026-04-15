@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"config.py","path":["module"]},"after":{"kind":"function_def","name":"with_timeout"},"name":"double_timeout","source":"def double_timeout():\n    return DEFAULT_TIMEOUT * 2\n"}

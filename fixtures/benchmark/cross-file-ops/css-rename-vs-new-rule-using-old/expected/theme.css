@@ -1,0 +1,7 @@
+.component {
+  padding: 8px;
+}
+
+.component.featured {
+  border: 2px solid gold;
+}

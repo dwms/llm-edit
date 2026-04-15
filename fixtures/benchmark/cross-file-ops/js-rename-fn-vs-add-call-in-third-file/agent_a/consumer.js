@@ -1,0 +1,3 @@
+function doWork() {
+  writeLog("working");
+}

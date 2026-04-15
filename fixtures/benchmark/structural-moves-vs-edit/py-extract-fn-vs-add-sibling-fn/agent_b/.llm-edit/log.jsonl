@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"parser.py","path":["module"]},"after":{"kind":"function_def","name":"parse"},"name":"parse_and_sort","source":"def parse_and_sort(tokens):\n    return sorted(parse(tokens))\n"}

@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"utils.py","path":["module"]},"after":{"kind":"function_def","name":"canonical"},"name":"canonical_list","source":"def canonical_list(items):\n    return [_normalize(i) for i in items]\n"}

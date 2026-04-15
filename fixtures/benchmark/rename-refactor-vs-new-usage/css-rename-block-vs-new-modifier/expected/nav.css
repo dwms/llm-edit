@@ -1,0 +1,12 @@
+.menu-item {
+  color: #333;
+  text-decoration: none;
+}
+
+.menu-item.active {
+  color: blue;
+}
+
+.menu-item:hover {
+  color: #666;
+}

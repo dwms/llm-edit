@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"billing.py","old":"compute_tax","new":"calc_tax","kinds":["identifier"]}
