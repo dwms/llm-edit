@@ -271,3 +271,42 @@ fn infer_detects_single_identifier_rename() {
     let app = fs::read_to_string(repo.join("app.py")).unwrap();
     assert_eq!(app, "def get(account_id):\n    return account_id\n");
 }
+
+/// `infer` covers the Python add_function / delete_function /
+/// add_import patterns when the diff isn't a pure rename.
+#[test]
+fn infer_detects_python_structural_diffs() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    fs::write(
+        repo.join("svc.py"),
+        "import os\n\n\ndef foo():\n    return 1\n\n\ndef bar():\n    return 2\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    // Edit: delete `foo`, add `baz` after `bar`, add `import sys`.
+    fs::write(
+        repo.join("svc.py"),
+        "import os\nimport sys\n\n\ndef bar():\n    return 2\n\n\ndef baz():\n    return 3\n",
+    )
+    .unwrap();
+
+    run_llm_edit(&["infer"], repo);
+
+    let log = fs::read_to_string(repo.join(".llm-edit/log.jsonl")).unwrap();
+    assert!(log.contains("\"op\":\"delete_function\""), "missing delete_function:\n{}", log);
+    assert!(log.contains("\"op\":\"add_function\""), "missing add_function:\n{}", log);
+    assert!(log.contains("\"op\":\"add_import\""), "missing add_import:\n{}", log);
+    assert!(log.contains("\"name\":\"foo\"") || log.contains("\"foo\""), "delete should reference foo:\n{}", log);
+    assert!(log.contains("\"name\":\"baz\""), "add should reference baz:\n{}", log);
+    assert!(log.contains("\"module\":\"sys\""), "add_import should reference sys:\n{}", log);
+}

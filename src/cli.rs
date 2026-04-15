@@ -135,26 +135,45 @@ pub fn run_infer() -> Result<(usize, usize)> {
         if before == after {
             continue;
         }
-        match infer_rename_for(ext, &before, &after) {
-            Some((old, new)) => {
-                let scope = "module".to_string();
-                let op = serde_json::json!({
-                    "op": "rename_symbol",
-                    "scope": scope,
-                    "file": rel,
-                    "old": old,
-                    "new": new,
-                    "kinds": ["parameter", "identifier"],
-                });
+        // Try rename first — when matched, it explains the entire diff
+        // and we don't need to look for add/delete patterns on top.
+        if let Some((old, new)) = infer_rename_for(ext, &before, &after) {
+            let op = serde_json::json!({
+                "op": "rename_symbol",
+                "scope": "module",
+                "file": rel,
+                "old": old,
+                "new": new,
+                "kinds": ["parameter", "identifier"],
+            });
+            new_ops.push(serde_json::from_value(op)?);
+            inferred += 1;
+            println!("  rename  {}  {} -> {}", rel, old, new);
+            continue;
+        }
+
+        // Python-specific patterns. JS/TS/Rust analogues are tracked in
+        // #44; build them per language as need arises.
+        let mut file_inferred = 0usize;
+        if ext == "py" {
+            for op in infer_python_patterns(rel, &before, &after)? {
+                let label = match &op {
+                    serde_json::Value::Object(o) => {
+                        o.get("op").and_then(|v| v.as_str()).unwrap_or("op").to_string()
+                    }
+                    _ => "op".to_string(),
+                };
                 let parsed: crate::ops::Op = serde_json::from_value(op)?;
                 new_ops.push(parsed);
-                inferred += 1;
-                println!("  rename  {}  {} -> {}", rel, old, new);
+                file_inferred += 1;
+                println!("  {}  {}", label, rel);
             }
-            None => {
-                skipped += 1;
-                println!("  skip  {}  (no rename pattern detected)", rel);
-            }
+        }
+        if file_inferred > 0 {
+            inferred += file_inferred;
+        } else {
+            skipped += 1;
+            println!("  skip  {}  (no pattern detected)", rel);
         }
     }
 
@@ -220,6 +239,162 @@ fn infer_rename_for(ext: &str, before: &str, after: &str) -> Option<(String, Str
     } else {
         None
     }
+}
+
+/// Detect Python-specific add_function / delete_function / add_import
+/// patterns by comparing top-level structure between `before` and
+/// `after`. Each returned JSON value is a fully-formed op ready to
+/// serialize into the log.
+fn infer_python_patterns(
+    rel: &str,
+    before: &str,
+    after: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let mut ops: Vec<serde_json::Value> = Vec::new();
+    let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&lang).is_err() {
+        return Ok(ops);
+    }
+    let Some(before_tree) = parser.parse(before, None) else {
+        return Ok(ops);
+    };
+    let Some(after_tree) = parser.parse(after, None) else {
+        return Ok(ops);
+    };
+    if before_tree.root_node().has_error() || after_tree.root_node().has_error() {
+        return Ok(ops);
+    }
+
+    let before_fns = python_top_level_fns(before_tree.root_node(), before.as_bytes());
+    let after_fns = python_top_level_fns(after_tree.root_node(), after.as_bytes());
+
+    use std::collections::{HashMap, HashSet};
+    let before_names: HashSet<&str> = before_fns.iter().map(|f| f.name.as_str()).collect();
+    let after_names: HashSet<&str> = after_fns.iter().map(|f| f.name.as_str()).collect();
+
+    // delete_function: in before, missing from after.
+    for f in &before_fns {
+        if !after_names.contains(f.name.as_str()) {
+            ops.push(serde_json::json!({
+                "op": "delete_function",
+                "anchor": {
+                    "file": rel,
+                    "path": ["module", {"kind": "function_def", "name": f.name}]
+                }
+            }));
+        }
+    }
+
+    // add_function: in after, missing from before. Need an `after`
+    // anchor — use the previous top-level function in the after-tree.
+    // If the new function is the file's first def, skip emitting (the
+    // op shape requires a sibling-after anchor in this MVP).
+    let after_fn_index: HashMap<&str, usize> =
+        after_fns.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)).collect();
+    for f in &after_fns {
+        if before_names.contains(f.name.as_str()) {
+            continue;
+        }
+        let idx = after_fn_index[f.name.as_str()];
+        if idx == 0 {
+            // No preceding sibling def — add_function shape can't anchor.
+            // Skip; merger's text-fallback covers this case.
+            continue;
+        }
+        let prev_name = &after_fns[idx - 1].name;
+        ops.push(serde_json::json!({
+            "op": "add_function",
+            "anchor": {"file": rel, "path": ["module"]},
+            "after": {"kind": "function_def", "name": prev_name},
+            "name": f.name,
+            "source": f.source,
+        }));
+    }
+
+    // add_import: lines in `after`'s top-of-file import block that
+    // weren't in `before`'s. v0 only handles `import X` (not
+    // `from Y import Z` or aliased) — that's what the add_import op
+    // applier supports today.
+    let before_imports: HashSet<String> = python_simple_imports(before).into_iter().collect();
+    for module in python_simple_imports(after) {
+        if !before_imports.contains(&module) {
+            ops.push(serde_json::json!({
+                "op": "add_import",
+                "anchor": {"file": rel},
+                "module": module,
+            }));
+        }
+    }
+
+    Ok(ops)
+}
+
+#[derive(Debug)]
+struct PyTopFn {
+    name: String,
+    source: String,
+}
+
+/// Walk the Python module's top-level statements; for each
+/// `function_definition`, capture its name and full source text.
+fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> {
+    let mut out: Vec<PyTopFn> = Vec::new();
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        if child.kind() != "function_definition" {
+            continue;
+        }
+        let name_node = match child.child_by_field_name("name") {
+            Some(n) => n,
+            None => continue,
+        };
+        let name = match std::str::from_utf8(&source[name_node.start_byte()..name_node.end_byte()])
+        {
+            Ok(s) => s.to_string(),
+            Err(_) => continue,
+        };
+        let body = match std::str::from_utf8(&source[child.start_byte()..child.end_byte()]) {
+            Ok(s) => {
+                // Ensure the source string ends in a newline — that's what
+                // the add_function applier expects.
+                if s.ends_with('\n') {
+                    s.to_string()
+                } else {
+                    format!("{}\n", s)
+                }
+            }
+            Err(_) => continue,
+        };
+        out.push(PyTopFn { name, source: body });
+    }
+    out
+}
+
+/// Collect plain `import X` module names from the contiguous top-of-
+/// file import block. Does NOT include `from ... import ...` or aliased
+/// imports — those would need new op shapes we don't have today.
+fn python_simple_imports(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("import ") {
+            let rest = &t[7..];
+            // Skip `as` aliases and dotted imports — keep it simple: take
+            // the first token.
+            let token = rest.split(|c: char| c.is_whitespace() || c == ',').next().unwrap_or("");
+            if !token.is_empty() && !token.contains('.') {
+                out.push(token.to_string());
+            }
+        } else if t.starts_with("from ") || t.is_empty() || t.starts_with('#') {
+            // `from` import or blank/comment — skip.
+            continue;
+        } else {
+            // Hit code; import block over.
+            break;
+        }
+    }
+    out
 }
 
 fn collect_all_identifiers(
