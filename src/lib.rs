@@ -49,20 +49,23 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
                     let text = tree
                         .get_mut(&path)
                         .ok_or_else(|| anyhow!("no such file {}", file))?;
-                    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    *text = match ext {
-                        "py" => py_ast_rename_identifier(text, old, new),
-                        _ => rename_word_boundary(text, old, new),
-                    };
+                    *text = rename_in_source_file(text, &path, old, new);
                 }
                 "project" => {
                     for (path, text) in tree.iter_mut() {
                         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                        if matches!(ext, "js" | "ts" | "jsx" | "tsx" | "html" | "htm") {
-                            // v0: textual word-boundary rewrite is safe enough
-                            // for the small fixtures. Real impl should use AST +
-                            // kind-aware rewrites.
-                            *text = rename_word_boundary(text, old, new);
+                        match ext {
+                            "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => {
+                                *text = rename_in_source_file(text, path, old, new);
+                            }
+                            "html" | "htm" => {
+                                // HTML is still textual — identifiers in event
+                                // handler values (`onclick="fn()"`) are the
+                                // common case; a stricter HTML AST pass is
+                                // tracked in #5.
+                                *text = rename_word_boundary(text, old, new);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -279,6 +282,20 @@ fn is_ident_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
+/// Dispatch identifier rename to the right AST backend for a given
+/// source file. Unknown extensions fall back to textual word-boundary
+/// rewrite.
+fn rename_in_source_file(text: &str, path: &Path, old: &str, new: &str) -> String {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    match ext {
+        "py" => py_ast_rename_identifier(text, old, new),
+        "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => {
+            js_ts_ast_rename_identifier(text, ext, old, new)
+        }
+        _ => rename_word_boundary(text, old, new),
+    }
+}
+
 /// AST-scoped rename for Python: rewrite every `identifier` node whose
 /// text equals `old` to `new`. String literal contents and comments are
 /// untouched because they are not identifier nodes.
@@ -328,6 +345,86 @@ fn collect_identifier_hits(
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
         collect_identifier_hits(child, source, old, hits);
+    }
+}
+
+/// AST-scoped rename for JavaScript / TypeScript (incl. JSX / TSX):
+/// rewrite every identifier-kind node whose text equals `old` to `new`.
+/// String-literal contents, template-string text (outside interpolation
+/// holes), regex bodies, and comments are NOT renamed because they are
+/// not identifier nodes in the grammar.
+///
+/// `ext` selects the parser:
+///   - `"js" | "jsx" | "mjs" | "cjs"` → tree-sitter-javascript
+///   - `"ts"` → tree-sitter-typescript (TypeScript grammar)
+///   - `"tsx"` → tree-sitter-typescript (TSX grammar)
+///
+/// Unknown extensions return `source` unchanged.
+pub fn js_ts_ast_rename_identifier(
+    source: &str,
+    ext: &str,
+    old: &str,
+    new: &str,
+) -> String {
+    let lang: tree_sitter::Language = match ext {
+        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
+        "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        _ => return source.to_string(),
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&lang).is_err() {
+        return source.to_string();
+    }
+    let Some(tree) = parser.parse(source, None) else {
+        return source.to_string();
+    };
+    let bytes = source.as_bytes();
+    let old_b = old.as_bytes();
+
+    let mut hits: Vec<(usize, usize)> = Vec::new();
+    collect_js_identifier_hits(tree.root_node(), bytes, old_b, &mut hits);
+    hits.sort_unstable();
+    hits.dedup();
+    let mut out = source.to_string();
+    for (s, e) in hits.iter().rev() {
+        out.replace_range(*s..*e, new);
+    }
+    out
+}
+
+fn collect_js_identifier_hits(
+    node: tree_sitter::Node,
+    source: &[u8],
+    old: &[u8],
+    hits: &mut Vec<(usize, usize)>,
+) {
+    let kind = node.kind();
+    // The tree-sitter-javascript / tree-sitter-typescript grammars expose
+    // a handful of identifier-flavoured node kinds. We rewrite every one
+    // whose text matches `old`. Strings, template text, regex bodies, and
+    // comments are OTHER node kinds (`string_fragment`, `template_chars`,
+    // `comment`, …) and are skipped by design.
+    let is_ident = matches!(
+        kind,
+        "identifier"
+            | "property_identifier"
+            | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern"
+            | "type_identifier"
+            | "jsx_identifier"
+    );
+    if is_ident {
+        let s = node.start_byte();
+        let e = node.end_byte();
+        if &source[s..e] == old {
+            hits.push((s, e));
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_js_identifier_hits(child, source, old, hits);
     }
 }
 
