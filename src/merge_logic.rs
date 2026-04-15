@@ -33,6 +33,40 @@ pub enum ConflictReport {
         a_new: String,
         b_new: String,
     },
+    RenameCssClassMismatch {
+        old: String,
+        a_new: String,
+        b_new: String,
+    },
+    WrapElementMismatch {
+        file: String,
+        selector: String,
+        a_wrapper: String,
+        b_wrapper: String,
+    },
+    RetypePreconditionViolated {
+        file: String,
+        variable: String,
+        from: String,
+        to: String,
+        invalidated_by: String,
+    },
+    DeleteVsNewCaller {
+        file: String,
+        deleted: String,
+        caller: String,
+    },
+    InsertAnchorDeleted {
+        file: String,
+        #[serde(rename = "fn")]
+        fn_name: String,
+        b_anchor_line: String,
+        deleted_by: String,
+    },
+    RenameVsDelete {
+        file: String,
+        symbol: String,
+    },
 }
 
 pub enum MergeResult {
@@ -254,8 +288,92 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
             // anchor's content is simply not there at all.)
             Ok(!text.contains(old.as_str()) && text.contains(new.as_str()))
         }
+        Op::RenameSymbol { scope, file, old, .. } => {
+            // Already applied iff the old name is no longer visible in the
+            // scope the op would rewrite. The underlying applier is itself
+            // idempotent (no-match → no-op), but declaring the skip here
+            // keeps behavior uniform and lets us document it.
+            match scope.as_str() {
+                "module" => {
+                    let Some(text) = tree.get(&PathBuf::from(file)) else {
+                        return Ok(false);
+                    };
+                    Ok(!contains_word(text, old))
+                }
+                "project" => Ok(tree.values().all(|t| !contains_word(t, old))),
+                _ => Ok(false),
+            }
+        }
+        Op::RenameCssClass { old, .. } => {
+            // Idempotent iff no CSS / HTML file still mentions the old class.
+            Ok(tree.iter().all(|(path, text)| {
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                match ext {
+                    "css" | "html" | "htm" => !text.contains(old.as_str()),
+                    _ => true,
+                }
+            }))
+        }
+        Op::SortBlock { anchor, key } => {
+            if key != "alphabetic" {
+                return Ok(false);
+            }
+            let Some(file) = anchor.get("file").and_then(|v| v.as_str()) else {
+                return Ok(false);
+            };
+            let Some(text) = tree.get(&PathBuf::from(file)) else {
+                return Ok(false);
+            };
+            Ok(import_block_is_sorted(text))
+        }
         _ => Ok(false),
     }
+}
+
+/// Word-boundary substring match, consistent with `rename_word_boundary`:
+/// `word` matches only when adjacent characters are non-wordy (or at file
+/// boundaries). Used by `op_is_noop_against` for symbol-rename dedup.
+fn contains_word(text: &str, word: &str) -> bool {
+    if word.is_empty() {
+        return false;
+    }
+    let bytes = text.as_bytes();
+    let wb = word.as_bytes();
+    let is_wordy = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut i = 0;
+    while i + wb.len() <= bytes.len() {
+        if &bytes[i..i + wb.len()] == wb {
+            let before_ok = i == 0 || !is_wordy(bytes[i - 1]);
+            let after_ok = i + wb.len() == bytes.len() || !is_wordy(bytes[i + wb.len()]);
+            if before_ok && after_ok {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// True when the contiguous run of leading `import` / `from … import` lines
+/// is already alphabetically ordered. Used by `op_is_noop_against` for
+/// `sort_block` dedup.
+fn import_block_is_sorted(text: &str) -> bool {
+    let mut block: Vec<&str> = Vec::new();
+    let mut started = false;
+    for l in text.lines() {
+        let t = l.trim_start();
+        let is_import = t.starts_with("import ") || t.starts_with("from ");
+        if is_import {
+            block.push(l);
+            started = true;
+        } else if started {
+            break;
+        }
+    }
+    if block.len() < 2 {
+        return true;
+    }
+    block.windows(2).all(|w| w[0].trim() <= w[1].trim())
 }
 
 fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
@@ -342,6 +460,230 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
         }
     }
 
+    // rename_css_class disagreement: same old, different new.
+    for a in ops_a {
+        if let Op::RenameCssClass { scope: a_scope, old: a_old, new: a_new } = a {
+            if a_scope != "project" {
+                continue;
+            }
+            for b in ops_b {
+                if let Op::RenameCssClass { scope: b_scope, old: b_old, new: b_new } = b {
+                    if b_scope == "project" && a_old == b_old && a_new != b_new {
+                        out.push(ConflictReport::RenameCssClassMismatch {
+                            old: a_old.clone(),
+                            a_new: a_new.clone(),
+                            b_new: b_new.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // wrap_element disagreement: same file+selector, different wrapper.
+    for a in ops_a {
+        if let Op::WrapElement { anchor: a_anc, wrapper: a_w } = a {
+            let a_file = a_anc.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let a_sel = a_anc.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+            for b in ops_b {
+                if let Op::WrapElement { anchor: b_anc, wrapper: b_w } = b {
+                    let b_file = b_anc.get("file").and_then(|v| v.as_str()).unwrap_or("");
+                    let b_sel = b_anc.get("selector").and_then(|v| v.as_str()).unwrap_or("");
+                    if a_file == b_file && a_sel == b_sel && a_w != b_w {
+                        out.push(ConflictReport::WrapElementMismatch {
+                            file: a_file.to_string(),
+                            selector: a_sel.to_string(),
+                            a_wrapper: a_w.clone(),
+                            b_wrapper: b_w.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // retype_binding precondition violated by B's reassignment — emit
+    // conflict unless the op explicitly asked to drop on violation.
+    let b_reassigns = variables_reassigned_by(ops_b);
+    for a in ops_a {
+        if let Op::RetypeBinding { anchor, from, to, precondition, on_violation } = a {
+            let wants_unreassigned =
+                precondition.get("reassigned").and_then(|v| v.as_bool()) == Some(false);
+            if !wants_unreassigned || on_violation == "drop" {
+                continue;
+            }
+            let var = anchor
+                .get("variable")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if b_reassigns.contains(&var) {
+                let file = anchor
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                out.push(ConflictReport::RetypePreconditionViolated {
+                    file,
+                    variable: var,
+                    from: from.clone(),
+                    to: to.clone(),
+                    invalidated_by: "new_reassignment".to_string(),
+                });
+            }
+        }
+    }
+    // Same check, symmetric: B's retype invalidated by A's reassignment.
+    let a_reassigns = variables_reassigned_by(ops_a);
+    for b in ops_b {
+        if let Op::RetypeBinding { anchor, from, to, precondition, on_violation } = b {
+            let wants_unreassigned =
+                precondition.get("reassigned").and_then(|v| v.as_bool()) == Some(false);
+            if !wants_unreassigned || on_violation == "drop" {
+                continue;
+            }
+            let var = anchor
+                .get("variable")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if a_reassigns.contains(&var) {
+                let file = anchor
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                out.push(ConflictReport::RetypePreconditionViolated {
+                    file,
+                    variable: var,
+                    from: from.clone(),
+                    to: to.clone(),
+                    invalidated_by: "new_reassignment".to_string(),
+                });
+            }
+        }
+    }
+
+    // delete_function vs new caller that references the deleted name.
+    let check_delete_vs_caller =
+        |del_ops: &[Op], add_ops: &[Op], out: &mut Vec<ConflictReport>| {
+            for a in del_ops {
+                if let Op::DeleteFunction { anchor } = a {
+                    let file = anchor
+                        .get("file")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let deleted = match extract_fn_name_from_path(anchor) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    let needle = format!("{}(", deleted);
+                    for b in add_ops {
+                        if let Op::AddFunction {
+                            anchor: b_anc,
+                            name,
+                            source,
+                            ..
+                        } = b
+                        {
+                            let b_file = b_anc
+                                .get("file")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if b_file == file && source.contains(&needle) {
+                                out.push(ConflictReport::DeleteVsNewCaller {
+                                    file: file.clone(),
+                                    deleted: deleted.clone(),
+                                    caller: name.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        };
+    check_delete_vs_caller(ops_a, ops_b, &mut out);
+    check_delete_vs_caller(ops_b, ops_a, &mut out);
+
+    // A's replace_in_anchor deletes a line B's insert_after needs.
+    let check_insert_anchor_deleted =
+        |replace_ops: &[Op], insert_ops: &[Op], out: &mut Vec<ConflictReport>| {
+            for a in replace_ops {
+                if let Op::ReplaceInAnchor { anchor, old, new } = a {
+                    let file = anchor
+                        .get("file")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let fn_name = match extract_fn_name_from_path(anchor) {
+                        Ok(n) => n,
+                        Err(_) => continue,
+                    };
+                    for b in insert_ops {
+                        if let Op::InsertAfter { anchor: b_anc, .. } = b {
+                            let b_file = b_anc
+                                .get("file")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let needle = b_anc
+                                .get("after_line_contains")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("");
+                            if b_file == file && old.contains(needle) && !new.contains(needle) {
+                                out.push(ConflictReport::InsertAnchorDeleted {
+                                    file: file.clone(),
+                                    fn_name: fn_name.clone(),
+                                    b_anchor_line: needle.to_string(),
+                                    deleted_by: "replace_in_anchor".to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        };
+    check_insert_anchor_deleted(ops_a, ops_b, &mut out);
+    check_insert_anchor_deleted(ops_b, ops_a, &mut out);
+
+    // rename_symbol vs delete_function targeting the same function.
+    let check_rename_vs_delete =
+        |rename_ops: &[Op], delete_ops: &[Op], out: &mut Vec<ConflictReport>| {
+            for a in rename_ops {
+                if let Op::RenameSymbol {
+                    scope,
+                    file: r_file,
+                    old,
+                    ..
+                } = a
+                {
+                    if scope != "module" {
+                        continue;
+                    }
+                    for b in delete_ops {
+                        if let Op::DeleteFunction { anchor } = b {
+                            let b_file = anchor
+                                .get("file")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let b_name = extract_fn_name_from_path(anchor).ok();
+                            if b_file == *r_file && b_name.as_deref() == Some(old.as_str()) {
+                                out.push(ConflictReport::RenameVsDelete {
+                                    file: b_file,
+                                    symbol: old.clone(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        };
+    check_rename_vs_delete(ops_a, ops_b, &mut out);
+    check_rename_vs_delete(ops_b, ops_a, &mut out);
+
     let mut seen = std::collections::HashSet::new();
     out.retain(|c| seen.insert(serde_json::to_string(c).unwrap()));
     out
@@ -378,8 +720,14 @@ fn variables_reassigned_by(ops: &[Op]) -> HashSet<String> {
     set
 }
 
+/// The precondition-filter version: drop A's retype only when policy is
+/// `drop`. The `conflict` policy is handled by `detect_conflicts` above,
+/// which emits a `RetypePreconditionViolated` report instead.
 fn retype_invalidated_by_b(op: &Op, b_reassigns: &HashSet<String>) -> bool {
-    if let Op::RetypeBinding { anchor, precondition, .. } = op {
+    if let Op::RetypeBinding { anchor, precondition, on_violation, .. } = op {
+        if on_violation != "drop" {
+            return false; // conflict path is handled by detect_conflicts
+        }
         let wants_unreassigned = precondition
             .get("reassigned")
             .and_then(|v| v.as_bool())
@@ -710,4 +1058,163 @@ fn retarget_fn_name(anchor: &serde_json::Value, new_name: &str) -> Result<serde_
         }
     }
     Err(anyhow!("no function_def segment to retarget"))
+}
+
+#[cfg(test)]
+mod idempotence_tests {
+    //! One test per dedup rule in `op_is_noop_against`. Each rule has a
+    //! positive case (skip) and a negative case (still apply) to pin the
+    //! state-based check against accidental over-/under-filtering.
+    use super::*;
+    use serde_json::json;
+
+    fn tree_of(pairs: &[(&str, &str)]) -> Tree {
+        pairs
+            .iter()
+            .map(|(p, t)| (PathBuf::from(p), t.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn add_import_skipped_when_already_present() {
+        let tree = tree_of(&[("tool.py", "import os\nimport sys\n\nprint(1)\n")]);
+        let op = Op::AddImport {
+            anchor: json!({"file": "tool.py"}),
+            module: "sys".into(),
+        };
+        assert!(op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn add_import_applied_when_absent() {
+        let tree = tree_of(&[("tool.py", "import os\n\nprint(1)\n")]);
+        let op = Op::AddImport {
+            anchor: json!({"file": "tool.py"}),
+            module: "sys".into(),
+        };
+        assert!(!op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn delete_function_skipped_when_target_gone() {
+        let tree = tree_of(&[("svc.py", "def keep():\n    pass\n")]);
+        let op = Op::DeleteFunction {
+            anchor: json!({
+                "file": "svc.py",
+                "path": ["module", {"kind": "function_def", "name": "old_fn"}]
+            }),
+        };
+        assert!(op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn delete_function_applied_when_target_still_present() {
+        let tree = tree_of(&[("svc.py", "def old_fn():\n    pass\n")]);
+        let op = Op::DeleteFunction {
+            anchor: json!({
+                "file": "svc.py",
+                "path": ["module", {"kind": "function_def", "name": "old_fn"}]
+            }),
+        };
+        assert!(!op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn replace_in_anchor_skipped_when_a_already_made_the_same_edit() {
+        let tree = tree_of(&[("greet.py", "def greet():\n    print(\"Hello\")\n")]);
+        let op = Op::ReplaceInAnchor {
+            anchor: json!({
+                "file": "greet.py",
+                "path": ["module", {"kind": "function_def", "name": "greet"}, "body"]
+            }),
+            old: "Helo".into(),
+            new: "Hello".into(),
+        };
+        assert!(op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn replace_in_anchor_applied_when_old_still_there() {
+        let tree = tree_of(&[("greet.py", "def greet():\n    print(\"Helo\")\n")]);
+        let op = Op::ReplaceInAnchor {
+            anchor: json!({
+                "file": "greet.py",
+                "path": ["module", {"kind": "function_def", "name": "greet"}, "body"]
+            }),
+            old: "Helo".into(),
+            new: "Hello".into(),
+        };
+        assert!(!op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn rename_symbol_module_skipped_when_old_name_gone() {
+        let tree = tree_of(&[("db.py", "def connect():\n    pass\n")]);
+        let op = Op::RenameSymbol {
+            scope: "module".into(),
+            file: "db.py".into(),
+            old: "get_conn".into(),
+            new: "connect".into(),
+            kinds: vec!["identifier".into()],
+        };
+        assert!(op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn rename_symbol_module_applied_when_old_name_present() {
+        let tree = tree_of(&[("db.py", "def get_conn():\n    pass\n")]);
+        let op = Op::RenameSymbol {
+            scope: "module".into(),
+            file: "db.py".into(),
+            old: "get_conn".into(),
+            new: "connect".into(),
+            kinds: vec!["identifier".into()],
+        };
+        assert!(!op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn rename_css_class_skipped_when_old_class_gone() {
+        let tree = tree_of(&[
+            ("style.css", ".btn-new { color: red; }\n"),
+            ("index.html", "<div class=\"btn-new\"></div>\n"),
+        ]);
+        let op = Op::RenameCssClass {
+            scope: "project".into(),
+            old: "btn-old".into(),
+            new: "btn-new".into(),
+        };
+        assert!(op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn rename_css_class_applied_when_old_class_present() {
+        let tree = tree_of(&[("style.css", ".btn-old { color: red; }\n")]);
+        let op = Op::RenameCssClass {
+            scope: "project".into(),
+            old: "btn-old".into(),
+            new: "btn-new".into(),
+        };
+        assert!(!op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn sort_block_skipped_when_already_sorted() {
+        let tree = tree_of(&[("main.py", "import a\nimport b\nimport c\n\nprint(1)\n")]);
+        let op = Op::SortBlock {
+            anchor: json!({"file": "main.py", "path": ["module", "imports"]}),
+            key: "alphabetic".into(),
+        };
+        assert!(op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn sort_block_applied_when_unsorted() {
+        let tree = tree_of(&[("main.py", "import c\nimport a\nimport b\n\nprint(1)\n")]);
+        let op = Op::SortBlock {
+            anchor: json!({"file": "main.py", "path": ["module", "imports"]}),
+            key: "alphabetic".into(),
+        };
+        assert!(!op_is_noop_against(&op, &tree).unwrap());
+    }
 }

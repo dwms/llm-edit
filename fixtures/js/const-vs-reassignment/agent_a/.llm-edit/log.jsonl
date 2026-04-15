@@ -1,1 +1,1 @@
-{"op":"retype_binding","anchor":{"file":"counter.js","variable":"count"},"from":"let","to":"const","precondition":{"reassigned":false}}
+{"op":"retype_binding","anchor":{"file":"counter.js","variable":"count"},"from":"let","to":"const","precondition":{"reassigned":false},"on_violation":"drop"}

@@ -7,6 +7,10 @@ pub struct Declaration {
     pub value: String,
 }
 
+fn default_on_violation() -> String {
+    "conflict".to_string()
+}
+
 /// An anchor is stored untyped and validated per op where used.
 /// This keeps the v0 shape flexible while we learn what the anchor
 /// model really needs.
@@ -81,6 +85,11 @@ pub enum Op {
         to: String,
         #[serde(default)]
         precondition: Value,
+        /// What to do if the precondition is invalidated by the other
+        /// agent's ops. `"conflict"` (default) surfaces a semantic
+        /// conflict. `"drop"` silently discards this retype.
+        #[serde(default = "default_on_violation")]
+        on_violation: String,
     },
     InsertAfter {
         anchor: Anchor,

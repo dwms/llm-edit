@@ -209,6 +209,34 @@ Given logs `A` and `B` over the same base tree:
 Symmetry: A and B are interchangeable. When both agents perform the same
 refactor (e.g. both rename X→Y), the second application is a no-op.
 
+## Merge semantics: convergent-edit idempotence
+
+When A and B issue the *same logical edit*, A applies, and B's attempt
+must not error out or duplicate the change. Before applying each rewritten
+B op, the merger consults `op_is_noop_against(op, tree)` and skips the op
+if the target state is already observed.
+
+Idempotence is **state-based**, not declarative: we look at the current
+post-A tree, not at op equality. Two ops that look identical might land on
+different files; two ops that look different might both be no-ops against
+specific state.
+
+Per-op dedup rules:
+
+| Op                  | Skip when…                                                                                  |
+| ------------------- | ------------------------------------------------------------------------------------------- |
+| `add_import`        | the target file already has a top-level `import <module>` line.                             |
+| `delete_function`   | the target file no longer contains a `def <fn_name>(` line.                                 |
+| `replace_in_anchor` | the target file no longer contains `old` AND already contains `new`. (Both checks required: absence alone could mean the anchor never matched at all, which is a different case the applier should surface.) |
+| `rename_symbol`     | the `old` name no longer appears (word-boundary) in the target file (`scope=module`) or in any file (`scope=project`). |
+| `rename_css_class`  | the old class no longer appears in any `.css` / `.html` file in the tree.                   |
+| `sort_block`        | the leading `import` / `from … import` block of the target file is already alphabetically ordered. |
+
+Skipped ops are not conflicts — they're successful no-ops recorded as
+"convergent". A genuine conflict (e.g. both agents `replace_in_anchor`
+with the same `old` but *different* `new`) is detected earlier by
+`detect_conflicts` and short-circuits before the idempotence check runs.
+
 ## Open questions
 
 - How does a human author write these logs? Direct JSONL is hostile;
