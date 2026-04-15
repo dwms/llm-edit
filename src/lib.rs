@@ -120,6 +120,7 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
             new_name,
             params,
             returns,
+            ..
         } => {
             let file = anchor_file(source)?;
             let fn_name = anchor_path_fn_name(source)?;

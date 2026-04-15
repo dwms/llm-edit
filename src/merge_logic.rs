@@ -160,6 +160,16 @@ pub fn merge_trees_and_ops(
         .filter(|op| !retype_invalidated_by_b(op, &b_reassigns))
         .collect();
 
+    // Enrich: every `extract_function` op in A that doesn't already
+    // carry a `moved_text` snapshot gets one captured from the current
+    // tree before the op applies. The snapshot is serialized into the
+    // merged output log so later-generation merges can reconstruct the
+    // extraction without the original base tree.
+    let ops_a: Vec<Op> = ops_a
+        .into_iter()
+        .map(|op| enrich_extract_with_moved_text(op, &tree))
+        .collect::<Result<Vec<_>>>()?;
+
     // Apply A one op at a time, skipping any that is already a no-op
     // against the current tree. This matters for multi-generation merges:
     // `ops_a` may be the merged log from an earlier generation whose
@@ -357,6 +367,19 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
                     _ => true,
                 }
             }))
+        }
+        Op::ExtractFunction { source, new_name, .. } => {
+            // Already applied iff the destination helper already exists
+            // in the file — which is how the extract applier leaves things.
+            let file = source
+                .get("file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("extract source missing file"))?;
+            let Some(text) = tree.get(&PathBuf::from(file)) else {
+                return Ok(false);
+            };
+            let needle = format!("def {}(", new_name);
+            Ok(text.contains(&needle))
         }
         Op::SortBlock { anchor, key } => {
             if key != "alphabetic" {
@@ -733,6 +756,51 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     out
 }
 
+/// If `op` is `extract_function` without a `moved_text` snapshot, capture
+/// one from the current tree's source function body so the op — once
+/// written to the merged log — is self-describing for later-generation
+/// merges. Non-extract ops pass through unchanged.
+fn enrich_extract_with_moved_text(op: Op, tree: &Tree) -> Result<Op> {
+    if let Op::ExtractFunction {
+        source,
+        body_range,
+        new_name,
+        params,
+        returns,
+        moved_text,
+    } = op
+    {
+        if moved_text.is_some() {
+            return Ok(Op::ExtractFunction {
+                source,
+                body_range,
+                new_name,
+                params,
+                returns,
+                moved_text,
+            });
+        }
+        let file = source
+            .get("file")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("extract source missing file"))?;
+        let from_fn = extract_fn_name_from_path(&source)?;
+        let captured = match tree.get(&PathBuf::from(file)) {
+            Some(text) => snapshot_fn_body_stmts(text, &from_fn, body_range).ok(),
+            None => None,
+        };
+        return Ok(Op::ExtractFunction {
+            source,
+            body_range,
+            new_name,
+            params,
+            returns,
+            moved_text: captured,
+        });
+    }
+    Ok(op)
+}
+
 fn op_touches_function(op: &Op, file: &str, fn_name: &str) -> bool {
     let anchor_fn = |anc: &serde_json::Value| -> Option<(String, String)> {
         let f = anc.get("file").and_then(|v| v.as_str())?.to_string();
@@ -806,7 +874,7 @@ fn collect_rewrites(ops: &[Op], base_tree: &Tree) -> Result<Rewrites> {
                 r.class_renames.push((old.clone(), new.clone()));
             }
             Op::ExtractFunction {
-                source, body_range, new_name, ..
+                source, body_range, new_name, moved_text: serialized_moved, ..
             } => {
                 let file = source
                     .get("file")
@@ -814,10 +882,18 @@ fn collect_rewrites(ops: &[Op], base_tree: &Tree) -> Result<Rewrites> {
                     .ok_or_else(|| anyhow!("extract source missing file"))?
                     .to_string();
                 let from_fn = extract_fn_name_from_path(source)?;
-                let base_text = base_tree
-                    .get(&PathBuf::from(&file))
-                    .ok_or_else(|| anyhow!("base missing {}", file))?;
-                let moved_text = snapshot_fn_body_stmts(base_text, &from_fn, *body_range)?;
+                // Prefer a snapshot serialized into the op — that's how
+                // extract ops from a prior-generation merged log survive.
+                // Fall back to reading the base_tree for first-gen merges.
+                let moved_text = match serialized_moved {
+                    Some(s) => s.clone(),
+                    None => {
+                        let base_text = base_tree
+                            .get(&PathBuf::from(&file))
+                            .ok_or_else(|| anyhow!("base missing {}", file))?;
+                        snapshot_fn_body_stmts(base_text, &from_fn, *body_range)?
+                    }
+                };
                 r.extractions.push(Extraction {
                     file,
                     from_fn,

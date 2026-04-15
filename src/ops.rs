@@ -53,6 +53,12 @@ pub enum Op {
         params: Vec<String>,
         #[serde(default)]
         returns: Vec<String>,
+        /// Snapshot of the statements extracted, captured by the merger
+        /// at apply-time and serialized into the merged log. Used by
+        /// later-generation merges' anchor-follows-content logic.
+        /// Agents never populate this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        moved_text: Option<String>,
     },
     DeleteNode {
         anchor: Anchor,
