@@ -46,6 +46,7 @@ struct Rewrites {
     project_symbol_renames: Vec<(String, String)>,
     class_renames: Vec<(String, String)>,
     extractions: Vec<Extraction>,
+    wraps: Vec<WrapEntry>,
 }
 
 #[derive(Debug)]
@@ -61,6 +62,16 @@ struct Extraction {
     from_fn: String,
     to_fn: String,
     moved_text: String,
+}
+
+/// Records that A ran `wrap_element` against `file`/`selector`. We keep
+/// the base-tree text of the element's children verbatim so
+/// `rewrite_b_op` can tell whether B's needle points at a line A just
+/// moved into the new wrapper (and therefore re-indented by +2 spaces).
+#[derive(Debug)]
+struct WrapEntry {
+    file: String,
+    base_children: String,
 }
 
 /// Full merge pipeline from a case directory: loads base, agent_a/b op-logs,
@@ -360,6 +371,29 @@ fn collect_rewrites(ops: &[Op], base_tree: &Tree) -> Result<Rewrites> {
                     moved_text,
                 });
             }
+            Op::WrapElement { anchor, .. } => {
+                let file = anchor
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let selector = anchor
+                    .get("selector")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if file.is_empty() || selector.is_empty() {
+                    continue;
+                }
+                if let Some(base_text) = base_tree.get(&PathBuf::from(&file)) {
+                    if let Some(children) = extract_element_children(base_text, &selector) {
+                        r.wraps.push(WrapEntry {
+                            file,
+                            base_children: children,
+                        });
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -480,8 +514,123 @@ fn rewrite_b_op(op: Op, r: &Rewrites) -> Result<Op> {
             }
             Op::AddRule { anchor, selector, declarations }
         }
+        Op::InsertAfter { anchor, content, reassigns } => {
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut anchor = anchor;
+            let mut content = content;
+
+            let ext = std::path::Path::new(&file)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("");
+            let is_source_ext = matches!(ext, "js" | "ts" | "jsx" | "tsx" | "html" | "htm");
+
+            // (1) Project-wide renames propagate to B's InsertAfter needle
+            // and content. Without this, a needle referencing the pre-rename
+            // symbol would fail to resolve against the post-A tree and any
+            // inserted code would still reference the dead name.
+            if is_source_ext {
+                if let Some(needle) = anchor
+                    .get("after_line_contains")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                {
+                    let mut rewritten = needle;
+                    for (old, new) in &r.project_symbol_renames {
+                        rewritten = rename_word_boundary(&rewritten, old, new);
+                    }
+                    set_needle(&mut anchor, rewritten);
+                }
+                for (old, new) in &r.project_symbol_renames {
+                    content = rename_word_boundary(&content, old, new);
+                }
+            }
+
+            // (2) Module-scope renames A made to THIS file also propagate
+            // into needle and content (mirrors the AddFunction arm).
+            for rn in &r.symbol_renames {
+                if rn.file != file {
+                    continue;
+                }
+                if let Some(needle) = anchor
+                    .get("after_line_contains")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                {
+                    let rewritten = rename_word_boundary(&needle, &rn.old, &rn.new);
+                    set_needle(&mut anchor, rewritten);
+                }
+                content = rename_word_boundary(&content, &rn.old, &rn.new);
+            }
+
+            // (3) HTML wrap: if B's needle targets a line that A's
+            // wrap_element moved into a new wrapper (children re-indented
+            // +2), shift B's content by the same +2 so the new line lands
+            // at the wrapped depth rather than at the old parent depth.
+            let is_html = matches!(ext, "html" | "htm");
+            if is_html {
+                let needle = anchor
+                    .get("after_line_contains")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !needle.is_empty() {
+                    for w in &r.wraps {
+                        if w.file != file {
+                            continue;
+                        }
+                        if w.base_children.lines().any(|l| l.contains(&needle)) {
+                            content = indent_nonblank_lines(&content, 2);
+                            break;
+                        }
+                    }
+                }
+            }
+
+            Op::InsertAfter { anchor, content, reassigns }
+        }
         other => other,
     })
+}
+
+fn set_needle(anchor: &mut serde_json::Value, val: String) {
+    if let Some(obj) = anchor.as_object_mut() {
+        obj.insert(
+            "after_line_contains".to_string(),
+            serde_json::Value::String(val),
+        );
+    }
+}
+
+/// Return the verbatim text *between* the open and close tags of the
+/// first `<selector>...</selector>` block in `text`, or None if not
+/// found. Used only to probe "does B's needle point into this block?".
+fn extract_element_children(text: &str, selector: &str) -> Option<String> {
+    let open_pat = format!("<{}>", selector);
+    let close_pat = format!("</{}>", selector);
+    let open_idx = text.find(&open_pat)?;
+    let after_open = open_idx + open_pat.len();
+    let close_rel = text[after_open..].find(&close_pat)?;
+    Some(text[after_open..after_open + close_rel].to_string())
+}
+
+/// Prepend `n` spaces to every non-blank line of `s`. Blank lines stay
+/// blank so we don't sprinkle trailing whitespace.
+fn indent_nonblank_lines(s: &str, n: usize) -> String {
+    let pad: String = " ".repeat(n);
+    s.split_inclusive('\n')
+        .map(|line| {
+            if line.trim().is_empty() {
+                line.to_string()
+            } else {
+                format!("{}{}", pad, line)
+            }
+        })
+        .collect()
 }
 
 fn retarget_fn_name(anchor: &serde_json::Value, new_name: &str) -> Result<serde_json::Value> {

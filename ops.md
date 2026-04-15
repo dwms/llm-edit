@@ -188,6 +188,17 @@ Given logs `A` and `B` over the same base tree:
      follows the content.
    - For every `wrap_element` in A, update B's DOM selectors so they
      still resolve.
+   - For every `rename_symbol` in A (project or module scope), rewrite
+     both the `content` *and* the `after_line_contains` needle of B's
+     `insert_after` ops, so (a) B's anchor still resolves against the
+     post-A file and (b) the inserted text references the new name.
+     The rewrite is word-boundary-scoped and applies to
+     `.js`/`.ts`/`.jsx`/`.tsx`/`.html` files.
+   - For every `wrap_element` in A, check whether B's `insert_after`
+     needle points at a line that lived inside the wrapped element in
+     the base tree. If so, indent B's `content` by +2 spaces per
+     non-blank line to match the depth shift A's wrap introduced —
+     the anchor follows the content into the new wrapper.
 5. **Apply B's rewritten refactors**.
 6. **Apply B's rewritten additive ops**.
 7. **Conflicts**: if an op's anchor fails to resolve after rewriting, or
