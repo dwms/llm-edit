@@ -271,11 +271,25 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
     }
 
     if commit {
-        let git_dir = PathBuf::from(git_cmd(&["rev-parse", "--git-dir"])?.trim());
-        std::fs::write(git_dir.join("MERGE_HEAD"), format!("{}\n", theirs_sha))?;
+        // Use plumbing to guarantee a two-parent merge commit.
+        // `git commit -m` with a hand-seeded MERGE_HEAD silently fell
+        // back to a single-parent commit during dogfooding (#41); the
+        // explicit commit-tree path bypasses that ambiguity.
+        let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
         let msg = format!("Merge branch '{}'", branch);
-        git_cmd(&["commit", "-q", "-m", &msg])?;
-    }
+        let commit_sha = git_cmd(&[
+            "commit-tree",
+            &tree_sha,
+            "-p",
+            &ours_sha,
+            "-p",
+            &theirs_sha,
+            "-m",
+            &msg,
+        ])?
+        .trim()
+        .to_string();
+        git_cmd(&["update-ref", "HEAD", &commit_sha])?;
 
     Ok(0)
 }
