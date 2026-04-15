@@ -440,37 +440,37 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
             let needle = format!("def {}(", new_name);
             Ok(text.contains(&needle))
         }
-        Op::SortBlock { anchor, key } => {
-            if key != "alphabetic" {
-                return Ok(false);
-            }
-            let Some(file) = anchor.get("file").and_then(|v| v.as_str()) else {
-                return Ok(false);
-            };
+        Op::WrapElement { anchor, wrapper } => {
+            // Already applied iff, immediately inside the selector's open
+            // tag (skipping whitespace), we already see the wrapper's
+            // opening tag. This catches the gen-2 replay case where the
+            // historical wrap op is reapplied to a tree that wrap_element
+            // has already mutated.
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("wrap_element.anchor.file missing"))?;
+            let selector = anchor
+                .get("selector")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("wrap_element.anchor.selector missing"))?;
             let Some(text) = tree.get(&PathBuf::from(file)) else {
                 return Ok(false);
             };
-            Ok(import_block_is_sorted(text))
-        }
-        _ => Ok(false),
-    }
-}
-
-/// Word-boundary substring match, consistent with `rename_word_boundary`:
-/// `word` matches only when adjacent characters are non-wordy (or at file
-/// boundaries). Used by `op_is_noop_against` for symbol-rename dedup.
-fn contains_word(text: &str, word: &str) -> bool {
-    if word.is_empty() {
-        return false;
-    }
-    let bytes = text.as_bytes();
-    let wb = word.as_bytes();
-    let is_wordy = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    let mut i = 0;
-    while i + wb.len() <= bytes.len() {
-        if &bytes[i..i + wb.len()] == wb {
-            let before_ok = i == 0 || !is_wordy(bytes[i - 1]);
-            let after_ok = i + wb.len() == bytes.len() || !is_wordy(bytes[i + wb.len()]);
+            // Extract wrapper's opening tag: split on `></` per
+            // wrap_element_children's contract (`<...></...>`).
+            let Some((wrap_open, _)) = wrapper.split_once("></") else {
+                return Ok(false);
+            };
+            let wrap_open_full = format!("{}>", wrap_open);
+            let open_pat = format!("<{}>", selector);
+            let Some(open_idx) = text.find(&open_pat) else {
+                return Ok(false);
+            };
+            let after = &text[open_idx + open_pat.len()..];
+            // First non-whitespace token after the open tag.
+            let trimmed = after.trim_start();
+            Ok(trimmed.starts_with(&wrap_open_full))
             if before_ok && after_ok {
                 return true;
             }
@@ -1438,7 +1438,36 @@ mod idempotence_tests {
     }
 
     #[test]
-    fn sort_block_applied_when_unsorted() {
+    fn wrap_element_skipped_when_wrapper_already_present() {
+        // Tree already contains the post-wrap shape: <section> immediately
+        // contains <div class="container"> as its first child. A historical
+        // wrap op replayed against this tree must be skipped.
+        let tree = tree_of(&[(
+            "page.html",
+            "<html>\n  <body>\n    <section>\n      <div class=\"container\">\n        <h1>Hi</h1>\n      </div>\n    </section>\n  </body>\n</html>\n",
+        )]);
+        let op = Op::WrapElement {
+            anchor: json!({"file": "page.html", "selector": "section"}),
+            wrapper: "<div class=\"container\"></div>".into(),
+        };
+        assert!(op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
+    fn wrap_element_applied_when_wrapper_absent() {
+        // <section>'s first child is <h1>, not the wrapper — wrap must run.
+        let tree = tree_of(&[(
+            "page.html",
+            "<html>\n  <body>\n    <section>\n      <h1>Hi</h1>\n    </section>\n  </body>\n</html>\n",
+        )]);
+        let op = Op::WrapElement {
+            anchor: json!({"file": "page.html", "selector": "section"}),
+            wrapper: "<div class=\"container\"></div>".into(),
+        };
+        assert!(!op_is_noop_against(&op, &tree).unwrap());
+    }
+
+    #[test]
         let tree = tree_of(&[("main.py", "import c\nimport a\nimport b\n\nprint(1)\n")]);
         let op = Op::SortBlock {
             anchor: json!({"file": "main.py", "path": ["module", "imports"]}),
