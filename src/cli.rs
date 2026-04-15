@@ -206,7 +206,11 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
         let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
         let merged = diff3_merge_strings(&ours_c, &base_c, &theirs_c)?;
-        if merged.contains("<<<<<<<") {
+        // Real diff3 conflict markers are at the start of a line.
+        // Substring search would false-positive on prose that mentions
+        // the literal "<<<<<<<" string (e.g. CONTRIBUTING.md describing
+        // what conflict markers look like).
+        if merged.lines().any(|l| l.starts_with("<<<<<<<")) {
             text_conflicts.push(path.clone());
         }
         final_tree.insert(path.clone(), merged);

@@ -264,7 +264,10 @@ fn score_diff3_positive(case: &Path) -> Result<bool> {
         if code != 0 {
             return Ok(false);
         }
-        if merged.contains("<<<<<<<") || merged.contains(">>>>>>>") {
+        // Real diff3 conflict markers are at the start of a line; a
+        // substring search would false-positive on prose mentioning
+        // the literal character sequence.
+        if merged.lines().any(|l| l.starts_with("<<<<<<<") || l.starts_with(">>>>>>>")) {
             return Ok(false);
         }
         let want = fs::read_to_string(&ep).with_context(|| format!("read {}", ep.display()))?;
@@ -289,7 +292,7 @@ fn score_diff3_negative(case: &Path) -> Result<bool> {
             continue;
         }
         let (_code, merged) = diff3_merge(&ap, &bp, &bp2)?;
-        if merged.contains("<<<<<<<") {
+        if merged.lines().any(|l| l.starts_with("<<<<<<<")) {
             return Ok(true);
         }
     }
