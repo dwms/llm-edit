@@ -12,6 +12,9 @@ clap = { version = "4", features = ["derive"] }
 tree-sitter = "0.25"
 tree-sitter-python = "0.23"
 
+[dev-dependencies]
+tempfile = "3"
+
 [[bin]]
 name = "baseline"
 path = "src/bin/baseline.rs"
@@ -31,6 +34,10 @@ path = "src/bin/llm_edit.rs"
 [[bin]]
 name = "verify_cli"
 path = "src/bin/verify_cli.rs"
+
+[[bin]]
+name = "bench"
+path = "src/bin/bench.rs"
 
 [lib]
 name = "llm_edit"

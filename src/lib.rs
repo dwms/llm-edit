@@ -1,4 +1,5 @@
 pub mod cli;
+pub mod merge_logic;
 pub mod ops;
 
 use anyhow::{Context, Result, anyhow};
