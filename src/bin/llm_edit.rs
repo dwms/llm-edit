@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use llm_edit::cli::{apply_op_json, merge_worktrees, run_git_merge, run_merge_driver};
+use llm_edit::cli::{apply_op_json, merge_worktrees, run_git_merge, run_infer, run_merge_driver};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -77,6 +77,13 @@ enum Cmd {
         #[arg(long)]
         no_commit: bool,
     },
+    /// Walk every changed file vs HEAD; for each, try to derive a
+    /// structured op from the before/after pair. Currently detects
+    /// single-identifier renames in py / js / jsx / mjs / cjs / ts /
+    /// tsx / rs files. Inferred ops are appended to .llm-edit/log.jsonl;
+    /// files on disk are not modified. Run AFTER editing, BEFORE
+    /// committing, so the commit captures both source + log.
+    Infer,
     /// (Experimental) Git merge-driver entry point. Intended for
     /// `.gitattributes merge=llm-edit`, but git sets `.git/MERGE_HEAD`
     /// only AFTER per-file drivers run, so this variant can't yet do
@@ -112,10 +119,15 @@ fn main() -> Result<()> {
             let code = run_merge_driver(&base, &ours, &theirs, &path)?;
             std::process::exit(code);
         }
+        Cmd::Infer => {
+            let (inferred, skipped) = run_infer()?;
+            println!("inferred {} op(s); {} file(s) had no detectable pattern", inferred, skipped);
+            return Ok(());
+        }
         _ => {}
     }
     let json = match args.cmd {
-        Cmd::Merge { .. } | Cmd::GitMerge { .. } | Cmd::MergeDriver { .. } => unreachable!(),
+        Cmd::Merge { .. } | Cmd::GitMerge { .. } | Cmd::MergeDriver { .. } | Cmd::Infer => unreachable!(),
         Cmd::Apply { json } => json,
         Cmd::RenameSymbol { file, old, new } => json!({
             "op": "rename_symbol",

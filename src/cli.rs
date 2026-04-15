@@ -87,6 +87,187 @@ fn write_output(output: &Path, tree: &Tree, log: &[Op]) -> Result<()> {
     Ok(())
 }
 
+/// Walk every file changed in the working tree vs HEAD and try to
+/// derive structured ops from the before/after pair. For each detected
+/// pattern, append the op to `.llm-edit/log.jsonl`. Files on disk are
+/// not modified — this is a pure recording pass.
+///
+/// MVP detects ONE pattern: single-identifier rename across `.py`,
+/// `.js`, `.jsx`, `.ts`, `.tsx`, `.rs`. If exactly one identifier
+/// disappeared between HEAD and the working tree AND exactly one new
+/// identifier appeared with matching occurrence count, emit a
+/// `rename_symbol` op for that file.
+///
+/// Files where no pattern matches are reported as "no inference"
+/// — they'll fall back to text-merge via the hybrid merger.
+///
+/// Returns (inferred_count, skipped_count).
+pub fn run_infer() -> Result<(usize, usize)> {
+    let repo_root = repo_root()?;
+    let changed = git_cmd(&["diff", "--name-only", "HEAD"])?;
+    let mut inferred = 0usize;
+    let mut skipped = 0usize;
+    let mut new_ops: Vec<crate::ops::Op> = Vec::new();
+
+    for line in changed.lines() {
+        let rel = line.trim();
+        if rel.is_empty() {
+            continue;
+        }
+        let path = std::path::PathBuf::from(rel);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        // Skip files we have no AST for.
+        if !matches!(ext, "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "rs") {
+            skipped += 1;
+            println!("  skip  {}  (no grammar for .{})", rel, ext);
+            continue;
+        }
+        let before = match git_cmd(&["show", &format!("HEAD:{}", rel)]) {
+            Ok(s) => s,
+            Err(_) => {
+                skipped += 1;
+                println!("  skip  {}  (not in HEAD)", rel);
+                continue;
+            }
+        };
+        let after = std::fs::read_to_string(repo_root.join(rel))
+            .with_context(|| format!("read {}", rel))?;
+        if before == after {
+            continue;
+        }
+        match infer_rename_for(ext, &before, &after) {
+            Some((old, new)) => {
+                let scope = "module".to_string();
+                let op = serde_json::json!({
+                    "op": "rename_symbol",
+                    "scope": scope,
+                    "file": rel,
+                    "old": old,
+                    "new": new,
+                    "kinds": ["parameter", "identifier"],
+                });
+                let parsed: crate::ops::Op = serde_json::from_value(op)?;
+                new_ops.push(parsed);
+                inferred += 1;
+                println!("  rename  {}  {} -> {}", rel, old, new);
+            }
+            None => {
+                skipped += 1;
+                println!("  skip  {}  (no rename pattern detected)", rel);
+            }
+        }
+    }
+
+    if !new_ops.is_empty() {
+        let log_dir = repo_root.join(".llm-edit");
+        std::fs::create_dir_all(&log_dir)?;
+        let log_path = log_dir.join("log.jsonl");
+        let mut text = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if !text.is_empty() && !text.ends_with('\n') {
+            text.push('\n');
+        }
+        for op in &new_ops {
+            text.push_str(&serde_json::to_string(op)?);
+            text.push('\n');
+        }
+        std::fs::write(&log_path, text)?;
+    }
+
+    Ok((inferred, skipped))
+}
+
+/// Return `Some((old, new))` if there is exactly one identifier name
+/// removed between `before` and `after` AND exactly one added, AND
+/// their occurrence counts match. Otherwise `None`.
+fn infer_rename_for(ext: &str, before: &str, after: &str) -> Option<(String, String)> {
+    let lang: tree_sitter::Language = match ext {
+        "py" => tree_sitter_python::LANGUAGE.into(),
+        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
+        "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "rs" => tree_sitter_rust::LANGUAGE.into(),
+        _ => return None,
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&lang).is_err() {
+        return None;
+    }
+    let before_tree = parser.parse(before, None)?;
+    let after_tree = parser.parse(after, None)?;
+    if before_tree.root_node().has_error() || after_tree.root_node().has_error() {
+        return None; // refuse to infer from broken parses
+    }
+    let mut before_idents: Vec<String> = Vec::new();
+    let mut after_idents: Vec<String> = Vec::new();
+    collect_all_identifiers(before_tree.root_node(), before.as_bytes(), &mut before_idents);
+    collect_all_identifiers(after_tree.root_node(), after.as_bytes(), &mut after_idents);
+
+    use std::collections::HashSet;
+    let before_set: HashSet<&str> = before_idents.iter().map(|s| s.as_str()).collect();
+    let after_set: HashSet<&str> = after_idents.iter().map(|s| s.as_str()).collect();
+    let removed: Vec<&str> = before_set.difference(&after_set).copied().collect();
+    let added: Vec<&str> = after_set.difference(&before_set).copied().collect();
+
+    if removed.len() != 1 || added.len() != 1 {
+        return None;
+    }
+    let old = removed[0];
+    let new = added[0];
+    let old_count = before_idents.iter().filter(|s| s.as_str() == old).count();
+    let new_count = after_idents.iter().filter(|s| s.as_str() == new).count();
+    if old_count == new_count && old_count > 0 {
+        Some((old.to_string(), new.to_string()))
+    } else {
+        None
+    }
+}
+
+fn collect_all_identifiers(
+    node: tree_sitter::Node,
+    source: &[u8],
+    out: &mut Vec<String>,
+) {
+    let kind = node.kind();
+    // Skip text-subtree kinds — same exclusion list as the renamers.
+    if matches!(
+        kind,
+        "string_literal"
+            | "raw_string_literal"
+            | "char_literal"
+            | "line_comment"
+            | "block_comment"
+            | "doc_comment"
+            | "comment"
+            | "template_chars"
+            | "string_fragment"
+    ) {
+        return;
+    }
+    let is_ident = matches!(
+        kind,
+        "identifier"
+            | "property_identifier"
+            | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern"
+            | "type_identifier"
+            | "jsx_identifier"
+            | "field_identifier"
+            | "shorthand_field_identifier"
+    );
+    if is_ident {
+        let s = node.start_byte();
+        let e = node.end_byte();
+        if let Ok(text) = std::str::from_utf8(&source[s..e]) {
+            out.push(text.to_string());
+        }
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_all_identifiers(child, source, out);
+    }
+}
+
 /// End-to-end git merge using llm-edit's structured-op merger, with
 /// a per-file fallback to text-based 3-way merge for files whose
 /// changes aren't fully reachable from the recorded op-log.

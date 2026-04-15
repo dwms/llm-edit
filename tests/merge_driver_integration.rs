@@ -213,3 +213,61 @@ fn git_merge_hybrid_preserves_unrecorded_edits() {
     assert!(log.contains("rename_symbol"), "log missing rename:\n{}", log);
     assert!(log.contains("add_function"), "log missing add_function:\n{}", log);
 }
+
+/// `llm-edit infer` derives a rename_symbol op from a textual edit.
+/// The user edits a file directly (no CLI), runs `infer`, and the log
+/// gains a rename op describing what they did. After this, future
+/// merges treat the file as ops-covered (semantic path) instead of
+/// falling back to text.
+#[test]
+fn infer_detects_single_identifier_rename() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    fs::write(
+        repo.join("app.py"),
+        "def get(user_id):\n    return user_id\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    // Edit via plain file write — NOT through the CLI. Rename
+    // `user_id` → `account_id` everywhere.
+    fs::write(
+        repo.join("app.py"),
+        "def get(account_id):\n    return account_id\n",
+    )
+    .unwrap();
+
+    // Run `llm-edit infer`. It should pick up the rename and append
+    // a rename_symbol op to the log.
+    run_llm_edit(&["infer"], repo);
+
+    let log = fs::read_to_string(repo.join(".llm-edit/log.jsonl")).unwrap();
+    assert!(
+        log.contains("rename_symbol"),
+        "infer didn't emit rename_symbol:\n{}",
+        log
+    );
+    assert!(
+        log.contains("\"old\":\"user_id\"") && log.contains("\"new\":\"account_id\""),
+        "infer didn't capture the right rename:\n{}",
+        log
+    );
+    assert!(
+        log.contains("\"file\":\"app.py\""),
+        "infer didn't include the file path:\n{}",
+        log
+    );
+
+    // The file on disk should be unchanged from the user's edit.
+    let app = fs::read_to_string(repo.join("app.py")).unwrap();
+    assert_eq!(app, "def get(account_id):\n    return account_id\n");
+}
