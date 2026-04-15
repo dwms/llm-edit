@@ -812,17 +812,43 @@ fn extract_function(
     let extract_start = stmt_ranges[lo].0;
     let extract_end_excl = stmt_ranges[hi].1 + 1;
 
-    // Check if the statement right after is `return <returns[0]>` — if so, absorb it.
+    // Scan forward from the statement after the extracted range, skipping blank
+    // and comment-only statements, and absorb a trailing `return <returns>` if
+    // we encounter one before any other real statement. This makes the absorb
+    // robust to blank lines / comments between the extracted body and the
+    // function's terminal return.
     let mut absorb_return_end = extract_end_excl;
-    let want_return = returns
-        .first()
-        .map(|r| format!("return {}", r))
-        .unwrap_or_default();
-    if hi + 1 < stmt_ranges.len() && !want_return.is_empty() {
-        let (s, e) = stmt_ranges[hi + 1];
-        let joined: String = lines[s..=e].concat();
-        if joined.trim() == want_return {
-            absorb_return_end = e + 1;
+    let want_return = if returns.is_empty() {
+        String::new()
+    } else {
+        format!("return {}", returns.join(", "))
+    };
+    if !want_return.is_empty() {
+        let mut k = hi + 1;
+        while k < stmt_ranges.len() {
+            let (s, e) = stmt_ranges[k];
+            let joined: String = lines[s..=e].concat();
+            let trimmed = joined.trim();
+            if trimmed.is_empty() {
+                // Defensive: stmt_ranges shouldn't contain pure-blank entries,
+                // but skip just in case.
+                k += 1;
+                continue;
+            }
+            // Comment-only statement: every non-blank line in the range starts with `#`.
+            let is_comment_only = lines[s..=e]
+                .iter()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .all(|l| l.starts_with('#'));
+            if is_comment_only {
+                k += 1;
+                continue;
+            }
+            if trimmed == want_return {
+                absorb_return_end = e + 1;
+            }
+            break;
         }
     }
 
