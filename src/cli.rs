@@ -581,4 +581,85 @@ mod parse_check_tests {
             "export function f(x: number): number { return x + 1; }\n"
         ));
     }
+
+    // ----- #54: dogfood corruption patterns ----------------------------
+    //
+    // Each of these is a real failure mode produced by `diff3 -m` text
+    // fallback during the #34 / #35 / #36 batch dogfood. They compiled-
+    // broken on master and only got caught by `cargo build`. The whole
+    // point of `parses_cleanly` is to surface them as merge conflicts so
+    // the merger refuses to silently land them.
+
+    /// Pattern 1: `fn name(...) {` declaration line dropped, leaving
+    /// the function body floating in module scope.
+    #[test]
+    fn rust_dropped_fn_declaration_caught() {
+        let broken = r#"
+fn intact() {
+    let x = 1;
+}
+
+
+    for a in items {
+        do_thing();
+    }
+}
+"#;
+        assert!(!parses_cleanly(Path::new("foo.rs"), broken));
+    }
+
+    /// Pattern 2: a method-call line wiped, leaving struct-init field
+    /// syntax inside an `if` block (mismatched `(` / `)` pairing).
+    #[test]
+    fn rust_wiped_call_line_caught() {
+        let broken = r#"
+fn x() {
+    if cond {
+            file: f.clone(),
+            deleted: d.clone(),
+        });
+    }
+}
+"#;
+        assert!(!parses_cleanly(Path::new("foo.rs"), broken));
+    }
+
+    /// Pattern 3: closing `}` of an inner block dropped — the actual
+    /// shape from `extract_function`'s `while` inside `if !want.empty()`.
+    #[test]
+    fn rust_dropped_inner_brace_caught() {
+        let broken = r#"
+fn x() {
+    let want_return = "return total".to_string();
+    if !want_return.is_empty() {
+        let mut k = 0;
+        while k < 5 {
+            if k == 3 { break; }
+            k += 1;
+    }
+
+    // <- this comment & subsequent code should belong to fn x's body
+    // but the missing `}` above means we're still inside `while`.
+    let extracted = "stuff";
+    println!("{}", extracted);
+}
+"#;
+        assert!(!parses_cleanly(Path::new("foo.rs"), broken));
+    }
+
+    /// Pattern 4: test `fn name() {` line wiped, leaving `#[test]`
+    /// directly above a function body.
+    #[test]
+    fn rust_wiped_test_fn_caught() {
+        let broken = r#"
+#[cfg(test)]
+mod tests {
+    #[test]
+        let x = 1;
+        assert_eq!(x, 1);
+    }
+}
+"#;
+        assert!(!parses_cleanly(Path::new("foo.rs"), broken));
+    }
 }

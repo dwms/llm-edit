@@ -9,9 +9,21 @@ that should land on `master`. From a clean checkout of `master`:
 
 ```sh
 git fetch && git checkout master && git pull
-llm-edit git-merge feat/issue-NN-foo
+cargo build --release --bin llm-edit   # see "rebuild before dogfood" below
+target/release/llm-edit git-merge feat/issue-NN-foo
 git push
 ```
+
+### Rebuild before dogfood
+
+Always rebuild the binary before running `git-merge` on a fresh
+master pull. The merger's text-fallback uses tree-sitter to flag
+syntactically-broken merge results — but only for grammars that
+were compiled into your binary at the time. Running a stale binary
+that lacks (e.g.) Rust grammar against a master that's gained Rust
+detection means corruption will silently land. This actually
+happened during the `#34/#35/#36` dogfood batch — the broken merges
+on `archive/broken-master-da7bf02` were the result.
 
 This:
 
