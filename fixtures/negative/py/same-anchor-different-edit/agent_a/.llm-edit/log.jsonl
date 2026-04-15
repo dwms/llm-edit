@@ -1,0 +1,1 @@
+{"op":"replace_in_anchor","anchor":{"file":"process.py","path":["module",{"kind":"function_def","name":"process"},"body"]},"old":"total = 0","new":"total = 100"}

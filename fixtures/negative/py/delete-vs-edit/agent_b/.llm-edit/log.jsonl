@@ -1,0 +1,1 @@
+{"op":"replace_in_anchor","anchor":{"file":"app.py","path":["module",{"kind":"function_def","name":"delete_user"},"body"]},"old":"query(\"DELETE\", [user_id])","new":"query(\"DELETE FROM users WHERE id = ?\", [user_id])"}

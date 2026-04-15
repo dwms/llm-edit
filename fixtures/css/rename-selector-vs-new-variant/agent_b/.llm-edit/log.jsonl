@@ -1,0 +1,1 @@
+{"op":"add_rule","anchor":{"file":"styles.css"},"selector":".card:hover","declarations":[{"prop":"border-color","value":"blue"}]}

@@ -1,0 +1,8 @@
+.panel {
+  border: 1px solid gray;
+  padding: 16px;
+}
+
+.panel:hover {
+  border-color: blue;
+}

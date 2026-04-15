@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"project","file":"","old":"handleClick","new":"onSubmit","kinds":["js-function","html-event-handler"]}

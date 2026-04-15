@@ -1,0 +1,1 @@
+{"kind":"replace_in_anchor_mismatch","file":"process.py","fn":"process","old":"total = 0","a_new":"total = 100","b_new":"total = 42"}

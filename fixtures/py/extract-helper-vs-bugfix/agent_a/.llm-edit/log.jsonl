@@ -1,0 +1,2 @@
+{"op":"extract_function","source":{"file":"process.py","path":["module",{"kind":"function_def","name":"process"},"body"]},"body_range":[1,2],"new_name":"_subtotal","params":["items"],"returns":["total"]}
+{"op":"delete_node","anchor":{"file":"process.py","path":["module",{"kind":"function_def","name":"process"},"body",{"kind":"comment","index":0}]}}
