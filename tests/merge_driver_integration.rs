@@ -126,3 +126,90 @@ fn git_merge_propagates_rename_into_new_caller() {
         parents
     );
 }
+
+/// Hybrid mode: one side has an unrecorded text edit alongside a
+/// recorded op. The unrecorded edit must survive the merge (text
+/// fallback for that file) while the other file's recorded op still
+/// merges semantically.
+#[test]
+fn git_merge_hybrid_preserves_unrecorded_edits() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    fs::write(
+        repo.join("app.py"),
+        "def get():\n    return 1\n",
+    )
+    .unwrap();
+    fs::write(
+        repo.join("util.py"),
+        "def helper():\n    return 2\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    // theirs: add a function in util.py via the CLI (recorded op).
+    run("git", &["checkout", "-b", "theirs", "-q"], repo);
+    run_llm_edit(
+        &[
+            "apply",
+            "--json",
+            r#"{"op":"add_function","anchor":{"file":"util.py","path":["module"]},"after":{"kind":"function_def","name":"helper"},"name":"twice","source":"def twice():\n    return helper() * 2\n"}"#,
+        ],
+        repo,
+    );
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "theirs: add twice"], repo);
+
+    // main: recorded rename + UNrecorded comment edit on the SAME file.
+    run("git", &["checkout", "main", "-q"], repo);
+    run_llm_edit(
+        &["rename-symbol", "--file", "app.py", "get", "fetch"],
+        repo,
+    );
+    let mut app = fs::read_to_string(repo.join("app.py")).unwrap();
+    app.push_str("# fetches the canonical id\n");
+    fs::write(repo.join("app.py"), app).unwrap();
+    run("git", &["add", "."], repo);
+    run(
+        "git",
+        &["commit", "-q", "-m", "main: rename + comment"],
+        repo,
+    );
+
+    // Merge.
+    run_llm_edit(&["git-merge", "theirs"], repo);
+
+    // app.py: rename + comment both present (text-fallback path).
+    let app = fs::read_to_string(repo.join("app.py")).unwrap();
+    assert!(
+        app.contains("def fetch():"),
+        "rename lost in fallback path:\n{}",
+        app
+    );
+    assert!(
+        app.contains("# fetches the canonical id"),
+        "unrecorded comment lost — hybrid fallback failed to preserve it:\n{}",
+        app
+    );
+
+    // util.py: semantic merge — both helper and twice present.
+    let util = fs::read_to_string(repo.join("util.py")).unwrap();
+    assert!(
+        util.contains("def helper():") && util.contains("def twice():"),
+        "util.py semantic merge dropped a function:\n{}",
+        util
+    );
+
+    // Merged log carries the recorded ops forward.
+    let log = fs::read_to_string(repo.join(".llm-edit/log.jsonl")).unwrap();
+    assert!(log.contains("rename_symbol"), "log missing rename:\n{}", log);
+    assert!(log.contains("add_function"), "log missing add_function:\n{}", log);
+}
