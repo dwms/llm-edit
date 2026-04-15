@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"useAuth.tsx","old":"useAuth","new":"useSession","kinds":["identifier"]}

@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"main.py","path":["module"]},"after":{"kind":"function_def","name":"run"},"name":"run_twice","source":"def run_twice():\n    return helper(20)\n"}

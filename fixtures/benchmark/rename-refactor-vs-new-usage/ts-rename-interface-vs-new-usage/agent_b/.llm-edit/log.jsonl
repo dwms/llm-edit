@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"models.ts","after_line_contains":"return `${o.id}: $${o.total}`;"},"content":"}\n\nexport function isBigOrder(o: Order): boolean {\n  return o.total > 1000;"}

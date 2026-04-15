@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"auth.py","old":"check_token","new":"verify_token","kinds":["identifier"]}

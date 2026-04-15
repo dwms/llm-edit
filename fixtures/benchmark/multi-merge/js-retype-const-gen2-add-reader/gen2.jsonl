@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"config.js","after_line_contains":"url: () => apiUrl,"},"content":"    host: () => new URL(apiUrl).host,"}

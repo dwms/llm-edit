@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"geometry.py","old":"dist","new":"distance","kinds":["identifier"]}

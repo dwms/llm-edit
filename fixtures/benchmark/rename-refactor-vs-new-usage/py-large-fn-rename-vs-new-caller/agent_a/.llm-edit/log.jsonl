@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"invoices.py","old":"compute_total","new":"calculate_total","kinds":["identifier"]}

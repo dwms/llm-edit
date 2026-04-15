@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"client.ts","after_line_contains":"body: JSON.stringify(body) });"},"content":"}\n\nexport async function httpPut(url: string, body: unknown): Promise<Response> {\n  const res = await httpGet(url);\n  if (res.ok) return httpPost(url, body);\n  return res;"}

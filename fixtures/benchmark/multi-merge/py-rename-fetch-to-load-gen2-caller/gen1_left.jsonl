@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"repo.py","old":"fetch","new":"load","kinds":["identifier"]}

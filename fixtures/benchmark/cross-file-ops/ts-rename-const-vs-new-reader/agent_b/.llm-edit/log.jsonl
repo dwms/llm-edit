@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"client.ts","after_line_contains":"return fetch(API_URL);"},"content":"}\n\nexport function healthUrl(): string {\n  return `${API_URL}/health`;"}

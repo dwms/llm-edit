@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"App.tsx","after_line_contains":"return <OkButton label=\"OK\" />;"},"content":"}\n\nexport function CancelRow() {\n  return <OkButton label=\"Cancel\" />;"}

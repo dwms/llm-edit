@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"parse.ts","after_line_contains":"  return n;"},"content":"}\n\nexport function handleSafe(s: string | undefined): number {\n  if (s === undefined) return 0;\n  return parseInput(s);"}

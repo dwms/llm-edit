@@ -1,0 +1,1 @@
+{"op":"extract_function","source":{"file":"cart.py","path":["module",{"kind":"function_def","name":"total"},"body"]},"body_range":[0,1],"new_name":"_subtotal","params":["items"],"returns":["subtotal"]}

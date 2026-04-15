@@ -1,0 +1,2 @@
+{"op":"delete_function","anchor":{"file":"main.py","path":["module",{"kind":"function_def","name":"helper"}]}}
+{"op":"add_function","anchor":{"file":"utils.py","path":["module"]},"after":{"kind":"function_def","name":"existing"},"name":"helper","source":"def helper(x):\n    return x * 2\n"}

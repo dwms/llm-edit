@@ -1,0 +1,2 @@
+{"op":"delete_function","anchor":{"file":"api.py","path":["module",{"kind":"function_def","name":"serialize"}]}}
+{"op":"add_function","anchor":{"file":"codec.py","path":["module"]},"after":{"kind":"function_def","name":"encode"},"name":"serialize","source":"def serialize(obj):\n    return str(obj)\n"}

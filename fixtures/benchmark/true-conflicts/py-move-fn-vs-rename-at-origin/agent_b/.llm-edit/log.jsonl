@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"math.py","old":"square","new":"sq","kinds":["identifier"]}

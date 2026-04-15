@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"pipeline.py","path":["module"]},"after":{"kind":"function_def","name":"count_rows"},"name":"report","source":"def report(rows):\n    return {\n        \"total\": count_rows(rows),\n        \"cleaned\": transform(rows),\n    }\n"}

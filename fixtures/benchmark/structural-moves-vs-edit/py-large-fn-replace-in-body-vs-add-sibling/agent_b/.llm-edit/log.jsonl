@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"report.py","path":["module"]},"after":{"kind":"function_def","name":"pretty_print"},"name":"export_csv","source":"def export_csv(report, path):\n    with open(path, \"w\") as f:\n        for table, total in report[\"totals\"].items():\n            f.write(f\"{table},{total}\\n\")\n"}

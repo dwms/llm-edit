@@ -1,0 +1,2 @@
+{"op":"delete_function","anchor":{"file":"math.py","path":["module",{"kind":"function_def","name":"square"}]}}
+{"op":"add_function","anchor":{"file":"util.py","path":["module"]},"after":{"kind":"function_def","name":"noop"},"name":"square","source":"def square(x):\n    return x * x\n"}

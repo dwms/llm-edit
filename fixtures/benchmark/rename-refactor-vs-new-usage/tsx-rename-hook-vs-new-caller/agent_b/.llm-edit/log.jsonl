@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"useAuth.tsx","after_line_contains":"return <div>{auth ? \"in\" : \"out\"}</div>;"},"content":"}\n\nexport function Footer() {\n  const auth = useAuth();\n  return <footer>{auth ? \"bye\" : \"\"}</footer>;"}

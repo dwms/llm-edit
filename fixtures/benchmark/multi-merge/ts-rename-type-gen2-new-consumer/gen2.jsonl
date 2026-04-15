@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"repo.ts","after_line_contains":"return all[0];"},"content":"}\n\nexport function lastUser(all: UserRecord[]): UserRecord {\n  return all[all.length - 1];"}

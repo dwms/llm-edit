@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"main.py","path":["module"]},"after":{"kind":"function_def","name":"run"},"name":"dump_state","source":"def dump_state(state):\n    return json.dumps(state)\n"}

@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"repo.py","path":["module"]},"after":{"kind":"function_def","name":"evict"},"name":"refresh","source":"def refresh(key):\n    value = fetch(key)\n    if value is None:\n        evict(key)\n    return value\n"}

@@ -1,0 +1,1 @@
+{"kind":"rename_vs_delete","file":"math.py","symbol":"square"}

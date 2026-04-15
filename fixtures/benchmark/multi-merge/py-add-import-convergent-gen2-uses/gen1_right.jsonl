@@ -1,0 +1,2 @@
+{"op":"add_import","anchor":{"file":"main.py"},"module":"json"}
+{"op":"sort_block","anchor":{"file":"main.py","path":["module","imports"]},"key":"alphabetic"}

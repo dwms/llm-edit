@@ -1,0 +1,1 @@
+{"op":"replace_in_anchor","anchor":{"file":"report.py","path":["module",{"kind":"function_def","name":"build_report"},"body"]},"old":"totals[row[\"table\"]] += row[\"amount\"]","new":"totals[row[\"table\"]] += row[\"amount\"] * 1.08"}

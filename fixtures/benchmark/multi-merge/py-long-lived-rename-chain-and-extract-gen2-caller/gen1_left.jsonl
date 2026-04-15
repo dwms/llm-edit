@@ -1,0 +1,2 @@
+{"op":"rename_symbol","scope":"module","file":"pipeline.py","old":"transform","new":"clean_rows","kinds":["identifier"]}
+{"op":"add_function","anchor":{"file":"pipeline.py","path":["module"]},"after":{"kind":"function_def","name":"clean_rows"},"name":"count_rows","source":"def count_rows(rows):\n    return len(clean_rows(rows))\n"}

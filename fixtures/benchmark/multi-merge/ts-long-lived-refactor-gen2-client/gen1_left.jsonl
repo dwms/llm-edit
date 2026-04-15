@@ -1,0 +1,2 @@
+{"op":"rename_symbol","scope":"project","old":"httpGet","new":"get"}
+{"op":"rename_symbol","scope":"project","old":"httpPost","new":"post"}

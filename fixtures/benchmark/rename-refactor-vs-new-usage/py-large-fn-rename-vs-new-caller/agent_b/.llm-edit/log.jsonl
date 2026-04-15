@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"invoices.py","path":["module"]},"after":{"kind":"function_def","name":"format_invoice"},"name":"total_for_report","source":"def total_for_report(invoice):\n    return compute_total(invoice) * 1.0\n"}

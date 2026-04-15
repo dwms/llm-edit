@@ -1,0 +1,4 @@
+{"op":"rename_symbol","scope":"module","file":"metrics.py","old":"record","new":"emit","kinds":["identifier"]}
+{"op":"rename_symbol","scope":"module","file":"metrics.py","old":"flush","new":"drain","kinds":["identifier"]}
+{"op":"add_import","anchor":{"file":"metrics.py"},"module":"sys"}
+{"op":"sort_block","anchor":{"file":"metrics.py","path":["module","imports"]},"key":"alphabetic"}

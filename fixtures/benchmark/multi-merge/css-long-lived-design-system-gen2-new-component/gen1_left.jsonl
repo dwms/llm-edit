@@ -1,0 +1,3 @@
+{"op":"rename_css_class","scope":"project","old":"card","new":"panel"}
+{"op":"rename_css_class","scope":"project","old":"btn","new":"button"}
+{"op":"add_rule","anchor":{"file":"styles.css"},"selector":".panel:hover","declarations":[{"prop":"border","value":"1px solid blue"}]}

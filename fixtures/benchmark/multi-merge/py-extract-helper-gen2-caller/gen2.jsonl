@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"cart.py","path":["module"]},"after":{"kind":"function_def","name":"total"},"name":"total_with_tax","source":"def total_with_tax(items, rate):\n    return total(items) * (1 + rate)\n"}

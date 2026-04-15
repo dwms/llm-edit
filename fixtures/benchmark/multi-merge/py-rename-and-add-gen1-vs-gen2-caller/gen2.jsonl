@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"auth.py","path":["module"]},"after":{"kind":"function_def","name":"rotate_secret"},"name":"require_auth","source":"def require_auth(token):\n    if not check_token(token):\n        raise PermissionError()\n    return True\n"}

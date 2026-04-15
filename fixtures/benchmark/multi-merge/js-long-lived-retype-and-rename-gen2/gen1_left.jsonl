@@ -1,0 +1,3 @@
+{"op":"retype_binding","anchor":{"file":"settings.js","variable":"timeout"},"from":"let","to":"const","precondition":{"reassigned":false}}
+{"op":"retype_binding","anchor":{"file":"settings.js","variable":"retries"},"from":"let","to":"const","precondition":{"reassigned":false}}
+{"op":"rename_symbol","scope":"module","file":"settings.js","old":"defaults","new":"getDefaults","kinds":["identifier"]}

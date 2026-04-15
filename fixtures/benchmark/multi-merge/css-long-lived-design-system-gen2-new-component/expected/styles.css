@@ -1,0 +1,15 @@
+.panel {
+  padding: 8px;
+}
+
+.button {
+  padding: 4px 8px;
+}
+
+.panel:hover {
+  border: 1px solid blue;
+}
+
+.panel .button {
+  margin: 4px;
+}

@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"codec.py","path":["module"]},"after":{"kind":"function_def","name":"encode"},"name":"decode","source":"def decode(b):\n    return b.decode(\"utf-8\")\n"}

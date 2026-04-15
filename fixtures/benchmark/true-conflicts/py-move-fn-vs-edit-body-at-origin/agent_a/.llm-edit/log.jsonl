@@ -1,0 +1,2 @@
+{"op":"delete_function","anchor":{"file":"svc.py","path":["module",{"kind":"function_def","name":"normalize"}]}}
+{"op":"add_function","anchor":{"file":"helpers.py","path":["module"]},"after":{"kind":"function_def","name":"ping"},"name":"normalize","source":"def normalize(s):\n    return s.strip().lower()\n"}

@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"users.py","old":"user_id","new":"uid","kinds":["parameter","identifier"]}
