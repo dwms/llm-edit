@@ -107,7 +107,14 @@ enum Cmd {
     /// HEAD detached at the partially-rebased state.
     #[command(name = "git-rebase")]
     GitRebase {
-        onto: String,
+        /// Branch to rebase onto (omit when using --continue or --abort).
+        onto: Option<String>,
+        /// Resume a paused rebase whose conflict you've now resolved.
+        #[arg(long, conflicts_with = "abort")]
+        r#continue: bool,
+        /// Abandon a paused rebase and restore the original branch.
+        #[arg(long)]
+        abort: bool,
     },
     /// (Experimental) Git merge-driver entry point. Intended for
     /// `.gitattributes merge=llm-edit`, but git sets `.git/MERGE_HEAD`
@@ -149,8 +156,17 @@ fn main() -> Result<()> {
             println!("inferred {} op(s); {} file(s) had no detectable pattern", inferred, skipped);
             return Ok(());
         }
-        Cmd::GitRebase { onto } => {
-            let code = run_git_rebase(&onto)?;
+        Cmd::GitRebase { onto, r#continue, abort } => {
+            let code = if abort {
+                llm_edit::cli::run_git_rebase_abort()?
+            } else if r#continue {
+                llm_edit::cli::run_git_rebase_continue()?
+            } else {
+                let onto = onto.ok_or_else(|| {
+                    anyhow::anyhow!("git-rebase: <onto> required when not using --continue / --abort")
+                })?;
+                run_git_rebase(&onto)?
+            };
             std::process::exit(code);
         }
         Cmd::DeleteComment { file, fn_name, text } => {

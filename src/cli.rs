@@ -9,6 +9,31 @@ use std::process::Command;
 use crate::merge_logic::{MergeResult, merge_trees_and_ops};
 use crate::ops::{Op, parse_log};
 use crate::{Tree, apply_log, load_tree};
+use serde::{Deserialize, Serialize};
+
+/// Persisted state for an in-progress `llm-edit git-rebase`. Written to
+/// `.git/llm-edit-rebase/state.json` at rebase start, updated on each
+/// successful step, and consumed (+ removed) by --continue / --abort.
+///
+/// `.git/` is gitignored by construction, so the state file is never
+/// tracked even though it lives inside the repo's git dir.
+#[derive(Debug, Serialize, Deserialize)]
+struct RebaseState {
+    /// Branch name the rebase started on, e.g. "feat/foo".
+    original_branch: String,
+    /// SHA the branch pointed at before we detached. Used by --abort.
+    original_head_sha: String,
+    /// SHA of the target base.
+    onto_sha: String,
+    /// Commits yet to be replayed, chronological order. On conflict,
+    /// commits_remaining[0] is the commit whose replay failed; the
+    /// working tree has been populated with the partial merge so the
+    /// user can resolve, and `--continue` commits that resolved tree
+    /// using the failing commit's metadata.
+    commits_remaining: Vec<String>,
+    /// Current tip of the rebase (parent for the next commit-tree).
+    rebase_head: String,
+}
 
 /// Apply a single op (parsed from JSON) against `cwd`, write changed files
 /// back to disk, and append the op to `cwd/.llm-edit/log.jsonl`.
@@ -32,56 +57,6 @@ pub fn apply_op_json(cwd: &Path, op_json: &str) -> Result<()> {
     // Append to log.
     append_op_to_log(cwd, op_json)?;
     Ok(())
-}
-
-/// Record a `delete_node` op that targets a comment identified by
-/// content-hash (not positional index). Computes a stable `node_id` from
-/// `(fn_name, normalized comment text)`, persists it to
-/// `.llm-edit/nodes.json` as the registry, emits an op carrying the
-/// `node_id` plus the inline text the applier needs, and applies the
-/// delete. Survives concurrent inserts of sibling comments that would
-/// drift a positional `{kind: "comment", index: N}` anchor.
-pub fn record_delete_comment(cwd: &Path, file: &str, fn_name: &str, comment_text: &str) -> Result<()> {
-    let node_id = crate::comment_node_id(fn_name, comment_text);
-    let normalized = crate::normalize_comment_text(comment_text);
-
-    // Persist the node entry in .llm-edit/nodes.json (the registry).
-    // Map shape: { node_id: {file, kind, parent_fn, text} }.
-    let nodes_path = cwd.join(".llm-edit/nodes.json");
-    std::fs::create_dir_all(cwd.join(".llm-edit"))?;
-    let mut nodes: serde_json::Value = if nodes_path.exists() {
-        let raw = std::fs::read_to_string(&nodes_path)
-            .with_context(|| format!("read {}", nodes_path.display()))?;
-        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
-    } else {
-        serde_json::json!({})
-    };
-    if let Some(map) = nodes.as_object_mut() {
-        map.insert(
-            node_id.clone(),
-            serde_json::json!({
-                "file": file,
-                "kind": "comment",
-                "parent_fn": fn_name,
-                "text": normalized,
-            }),
-        );
-    }
-    std::fs::write(&nodes_path, serde_json::to_string_pretty(&nodes)?)?;
-
-    // Emit the op. The anchor carries `text` inline so the applier does
-    // not have to cross-reference nodes.json during apply; nodes.json is
-    // the registry/audit log, the op is self-describing.
-    let op = serde_json::json!({
-        "op": "delete_node",
-        "anchor": {
-            "file": file,
-            "node_id": node_id,
-            "parent_fn": fn_name,
-            "text": normalized,
-        }
-    });
-    apply_op_json(cwd, &op.to_string())
 }
 
 /// Merge two worktrees on top of `base` and write merged source + log
@@ -809,6 +784,16 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
 /// inspect / resolve, and returns 1. (No `--continue` / `--abort`
 /// support yet — tracked on #42 as future work.)
 pub fn run_git_rebase(onto: &str) -> Result<i32> {
+    let state_path = rebase_state_path()?;
+    if state_path.exists() {
+        eprintln!(
+            "llm-edit git-rebase: an in-progress rebase exists (state at {}).",
+            state_path.display()
+        );
+        eprintln!("  Run `llm-edit git-rebase --continue` or `--abort` first.");
+        return Ok(1);
+    }
+
     let head_branch = git_cmd(&["symbolic-ref", "--short", "HEAD"])?
         .trim()
         .to_string();
@@ -849,34 +834,119 @@ pub fn run_git_rebase(onto: &str) -> Result<i32> {
     // user resolution).
     git_cmd(&["checkout", "--quiet", "--detach", &onto_sha])?;
 
-    let mut rebase_head = onto_sha.clone();
-    for (i, commit) in commits.iter().enumerate() {
+    let mut state = RebaseState {
+        original_branch: head_branch,
+        original_head_sha: head_sha,
+        onto_sha: onto_sha.clone(),
+        commits_remaining: commits,
+        rebase_head: onto_sha,
+    };
+    write_rebase_state(&state)?;
+
+    rebase_loop(&mut state)
+}
+
+/// Resume a rebase that previously stopped on conflict. Commits the
+/// current working tree as the replay of `commits_remaining[0]`, then
+/// continues the loop with the remaining commits.
+pub fn run_git_rebase_continue() -> Result<i32> {
+    let state_path = rebase_state_path()?;
+    if !state_path.exists() {
+        eprintln!("llm-edit git-rebase --continue: no rebase in progress.");
+        return Ok(1);
+    }
+    let mut state = read_rebase_state()?;
+    if state.commits_remaining.is_empty() {
+        eprintln!("llm-edit git-rebase --continue: state has no remaining commits.");
+        remove_rebase_state()?;
+        return Ok(1);
+    }
+
+    // The failing commit — we assume the user has resolved the tree on
+    // disk. Stage everything, commit-tree using the failing commit's
+    // message, advance rebase_head.
+    let failing = state.commits_remaining[0].clone();
+    let msg = git_cmd(&["log", "-1", "--format=%B", &failing])?
+        .trim_end_matches('\n')
+        .to_string();
+    git_cmd(&["add", "-A"])?;
+    let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
+    let new_commit = git_cmd(&[
+        "commit-tree",
+        &tree_sha,
+        "-p",
+        &state.rebase_head,
+        "-m",
+        &msg,
+    ])?
+    .trim()
+    .to_string();
+    git_cmd(&["update-ref", "HEAD", &new_commit])?;
+    state.rebase_head = new_commit;
+    state.commits_remaining.remove(0);
+    write_rebase_state(&state)?;
+
+    rebase_loop(&mut state)
+}
+
+/// Abort an in-progress rebase. Restores the original branch to its
+/// pre-rebase SHA, checks it out, and removes the state file.
+pub fn run_git_rebase_abort() -> Result<i32> {
+    let state_path = rebase_state_path()?;
+    if !state_path.exists() {
+        eprintln!("llm-edit git-rebase --abort: no rebase in progress.");
+        return Ok(1);
+    }
+    let state = read_rebase_state()?;
+    // Force the branch ref back to the pre-rebase SHA. Even if the
+    // branch was never touched (we only moved HEAD), updating to the
+    // same sha is a no-op and safe.
+    git_cmd(&[
+        "update-ref",
+        &format!("refs/heads/{}", state.original_branch),
+        &state.original_head_sha,
+    ])?;
+    // Reset index + working tree to the original branch tip before
+    // attaching, so the resolved-but-uncommitted conflict files don't
+    // linger.
+    git_cmd(&["read-tree", "--reset", "-u", &state.original_head_sha])?;
+    git_cmd(&["checkout", "--quiet", &state.original_branch])?;
+    remove_rebase_state()?;
+    eprintln!(
+        "llm-edit git-rebase --abort: restored '{}' to {}.",
+        state.original_branch,
+        &state.original_head_sha[..8.min(state.original_head_sha.len())]
+    );
+    Ok(0)
+}
+
+/// Replay state.commits_remaining onto state.rebase_head. Persists the
+/// updated state after each successful step, and on conflict. On clean
+/// completion, moves the branch ref + checks out + removes state.
+fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
+    while !state.commits_remaining.is_empty() {
+        let commit = state.commits_remaining[0].clone();
         let parent_sha = git_cmd(&["rev-parse", &format!("{}^", commit)])?
             .trim()
             .to_string();
-        let msg = git_cmd(&["log", "-1", "--format=%B", commit])?
+        let msg = git_cmd(&["log", "-1", "--format=%B", &commit])?
             .trim_end_matches('\n')
             .to_string();
         let short = &commit[..8];
 
-        match rebase_step(&parent_sha, &rebase_head, commit)? {
+        match rebase_step(&parent_sha, &state.rebase_head, &commit)? {
             RebaseStep::Clean { tree, log, fallback_files } => {
                 if !fallback_files.is_empty() {
                     eprintln!(
-                        "  [{}/{}] {} ({} text-fallback file(s))",
-                        i + 1,
-                        commits.len(),
+                        "  [{}] {} ({} text-fallback file(s))",
+                        short,
                         short,
                         fallback_files.len()
                     );
                 } else {
-                    eprintln!("  [{}/{}] {}", i + 1, commits.len(), short);
+                    eprintln!("  [{}]", short);
                 }
-                // Materialize the merged tree onto disk + index, then
-                // commit. read-tree --reset -u clears the index/wd to
-                // the rebase_head state first; we then write the
-                // merged content over it.
-                git_cmd(&["read-tree", "--reset", "-u", &rebase_head])?;
+                git_cmd(&["read-tree", "--reset", "-u", &state.rebase_head])?;
                 let repo_root = repo_root()?;
                 for (rel, content) in &tree {
                     let abs = repo_root.join(rel);
@@ -885,7 +955,6 @@ pub fn run_git_rebase(onto: &str) -> Result<i32> {
                     }
                     std::fs::write(&abs, content)?;
                 }
-                // Persist merged log alongside source.
                 let abs_log = repo_root.join(".llm-edit/log.jsonl");
                 std::fs::create_dir_all(abs_log.parent().unwrap())?;
                 let mut full_log = String::new();
@@ -901,29 +970,58 @@ pub fn run_git_rebase(onto: &str) -> Result<i32> {
                     "commit-tree",
                     &tree_sha,
                     "-p",
-                    &rebase_head,
+                    &state.rebase_head,
                     "-m",
                     &msg,
                 ])?
                 .trim()
                 .to_string();
                 git_cmd(&["update-ref", "HEAD", &new_commit])?;
-                rebase_head = new_commit;
+                state.rebase_head = new_commit;
+                state.commits_remaining.remove(0);
+                write_rebase_state(state)?;
             }
-            RebaseStep::Conflict { reason } => {
+            RebaseStep::Conflict {
+                reason,
+                partial_tree,
+                conflict_files,
+            } => {
+                // Materialize what we can onto disk so the user has
+                // something to resolve. If we don't have a partial
+                // tree (pre-tree semantic conflict), fall back to the
+                // rebase_head state so the user can at least inspect.
+                git_cmd(&["read-tree", "--reset", "-u", &state.rebase_head])?;
+                let repo_root = repo_root()?;
+                if let Some(tree) = &partial_tree {
+                    for (rel, content) in tree {
+                        let abs = repo_root.join(rel);
+                        if let Some(parent) = abs.parent() {
+                            std::fs::create_dir_all(parent).ok();
+                        }
+                        std::fs::write(&abs, content)?;
+                    }
+                }
+                // State already has commits_remaining[0] == failing
+                // commit; just persist.
+                write_rebase_state(state)?;
+
                 eprintln!(
-                    "llm-edit git-rebase: conflict on {} ({} of {}): {}",
-                    short,
-                    i + 1,
-                    commits.len(),
-                    reason
+                    "llm-edit git-rebase: conflict on {}: {}",
+                    short, reason
                 );
+                if !conflict_files.is_empty() {
+                    eprintln!(
+                        "  Resolve these file(s): {}",
+                        conflict_files
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
                 eprintln!(
-                    "  HEAD left detached at rebased tip {}; original branch '{}' unchanged.",
-                    &rebase_head[..8],
-                    head_branch
+                    "  Then run `llm-edit git-rebase --continue` or `llm-edit git-rebase --abort`."
                 );
-                eprintln!("  Resolve manually or `git checkout {}` to abort.", head_branch);
                 return Ok(1);
             }
         }
@@ -933,18 +1031,52 @@ pub fn run_git_rebase(onto: &str) -> Result<i32> {
     // re-attach HEAD.
     git_cmd(&[
         "update-ref",
-        &format!("refs/heads/{}", head_branch),
-        &rebase_head,
+        &format!("refs/heads/{}", state.original_branch),
+        &state.rebase_head,
     ])?;
-    git_cmd(&["checkout", "--quiet", &head_branch])?;
+    git_cmd(&["checkout", "--quiet", &state.original_branch])?;
+    remove_rebase_state()?;
 
     eprintln!(
-        "llm-edit git-rebase: replayed {} commit(s) onto {} ({})",
-        commits.len(),
-        onto,
-        &onto_sha[..8]
+        "llm-edit git-rebase: replayed onto {} ({})",
+        state.original_branch,
+        &state.onto_sha[..8.min(state.onto_sha.len())]
     );
     Ok(0)
+}
+
+fn rebase_state_path() -> Result<PathBuf> {
+    let git_dir = git_cmd(&["rev-parse", "--git-dir"])?;
+    Ok(PathBuf::from(git_dir.trim())
+        .join("llm-edit-rebase")
+        .join("state.json"))
+}
+
+fn write_rebase_state(state: &RebaseState) -> Result<()> {
+    let path = rebase_state_path()?;
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let body = serde_json::to_string_pretty(state)?;
+    std::fs::write(&path, body)?;
+    Ok(())
+}
+
+fn read_rebase_state() -> Result<RebaseState> {
+    let path = rebase_state_path()?;
+    let body = std::fs::read_to_string(&path)
+        .with_context(|| format!("read {}", path.display()))?;
+    Ok(serde_json::from_str(&body)?)
+}
+
+fn remove_rebase_state() -> Result<()> {
+    let path = rebase_state_path()?;
+    if path.exists() {
+        std::fs::remove_file(&path).ok();
+        // Best-effort: remove the parent dir if empty.
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+    Ok(())
 }
 
 enum RebaseStep {
@@ -955,6 +1087,14 @@ enum RebaseStep {
     },
     Conflict {
         reason: String,
+        /// Partial merged tree — non-conflicted files resolved cleanly,
+        /// conflicted files contain diff3 output (possibly with markers).
+        /// None on a pre-tree semantic conflict where we can't build a
+        /// useful partial tree.
+        partial_tree: Option<Tree>,
+        /// Files whose diff3 output didn't parse cleanly or carried
+        /// conflict markers — the user needs to edit these.
+        conflict_files: Vec<PathBuf>,
     },
 }
 
@@ -1005,6 +1145,8 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
+                partial_tree: None,
+                conflict_files: Vec::new(),
             });
         }
     };
@@ -1018,6 +1160,8 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
 
     let mut final_tree: Tree = Tree::new();
     let mut fallback_files: Vec<PathBuf> = Vec::new();
+    let mut conflict_files: Vec<PathBuf> = Vec::new();
+    let mut conflict_reasons: Vec<String> = Vec::new();
 
     for path in &all_files {
         let a_covered = expected_a.get(path) == ours_tree.get(path);
@@ -1038,16 +1182,25 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
         let has_markers = merged.lines().any(|l| l.starts_with("<<<<<<<"));
         let parse_ok = parses_cleanly(path, &merged);
         if has_markers || !parse_ok {
-            return Ok(RebaseStep::Conflict {
-                reason: format!(
-                    "text-fallback conflict in {} (markers={}, parse_ok={})",
-                    path.display(),
-                    has_markers,
-                    parse_ok
-                ),
-            });
+            conflict_files.push(path.clone());
+            conflict_reasons.push(format!(
+                "{} (markers={}, parse_ok={})",
+                path.display(),
+                has_markers,
+                parse_ok
+            ));
         }
+        // Always insert the diff3 output — the caller materializes this
+        // to the working tree so the user has something to resolve.
         final_tree.insert(path.clone(), merged);
+    }
+
+    if !conflict_files.is_empty() {
+        return Ok(RebaseStep::Conflict {
+            reason: format!("text-fallback conflict(s): {}", conflict_reasons.join(", ")),
+            partial_tree: Some(final_tree),
+            conflict_files,
+        });
     }
 
     Ok(RebaseStep::Clean {
@@ -1272,6 +1425,58 @@ fn append_op_to_log(cwd: &Path, op_json: &str) -> Result<()> {
     text.push('\n');
     std::fs::write(&log_path, text)?;
     Ok(())
+}
+
+/// Record a `delete_node` op that targets a comment identified by
+/// content-hash (not positional index). Computes a stable `node_id` from
+/// `(fn_name, normalized comment text)`, persists it to
+/// `.llm-edit/nodes.json` as the registry, emits an op carrying the
+/// `node_id` plus the inline text the applier needs, and applies the
+/// delete. Survives concurrent inserts of sibling comments that would
+/// drift a positional `{kind: "comment", index: N}` anchor.
+pub fn record_delete_comment(
+    cwd: &Path,
+    file: &str,
+    fn_name: &str,
+    comment_text: &str,
+) -> Result<()> {
+    let node_id = crate::comment_node_id(fn_name, comment_text);
+    let normalized = crate::normalize_comment_text(comment_text);
+
+    // Persist the node entry in .llm-edit/nodes.json (the registry).
+    // Map shape: { node_id: {file, kind, parent_fn, text} }.
+    let nodes_path = cwd.join(".llm-edit/nodes.json");
+    std::fs::create_dir_all(cwd.join(".llm-edit"))?;
+    let mut nodes: serde_json::Value = if nodes_path.exists() {
+        let raw = std::fs::read_to_string(&nodes_path)
+            .with_context(|| format!("read {}", nodes_path.display()))?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if let Some(map) = nodes.as_object_mut() {
+        map.insert(
+            node_id.clone(),
+            serde_json::json!({
+                "file": file,
+                "kind": "comment",
+                "parent_fn": fn_name,
+                "text": normalized,
+            }),
+        );
+    }
+    std::fs::write(&nodes_path, serde_json::to_string_pretty(&nodes)?)?;
+
+    let op = serde_json::json!({
+        "op": "delete_node",
+        "anchor": {
+            "file": file,
+            "node_id": node_id,
+            "parent_fn": fn_name,
+            "text": normalized,
+        }
+    });
+    apply_op_json(cwd, &op.to_string())
 }
 
 #[cfg(test)]
