@@ -93,6 +93,18 @@ struct Rewrites {
     class_renames: Vec<(String, String)>,
     extractions: Vec<Extraction>,
     wraps: Vec<WrapEntry>,
+    /// Per-file `(from_keyword, to_keyword, variable)` tuples from A's
+    /// retype_binding ops. Used to rewrite B's `insert_after` needles
+    /// that reference the pre-retype declaration line.
+    retypes: Vec<RetypeEntry>,
+}
+
+#[derive(Debug)]
+struct RetypeEntry {
+    file: String,
+    from: String,
+    to: String,
+    variable: String,
 }
 
 #[derive(Debug)]
@@ -317,6 +329,35 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
             // line-exact (ignoring leading whitespace / trailing newline)
             Ok(text.lines().any(|l| l.trim() == needle))
         }
+        Op::AddRule { anchor, selector, .. } => {
+            // Already applied iff the stylesheet already contains a
+            // selector block starting with `<selector> {`.
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("add_rule.anchor.file missing"))?;
+            let Some(text) = tree.get(&PathBuf::from(file)) else {
+                return Ok(false);
+            };
+            let needle = format!("{} {{", selector);
+            Ok(text.contains(&needle))
+        }
+        Op::AddFunction { anchor, name, .. } => {
+            // Already applied iff the target file already has
+            // `def <name>(` (Python) or `function <name>(` (JS) or
+            // shape-agnostic `<name>(` after a keyword. For v0 the only
+            // add_function callers are Python fixtures, so `def` is
+            // sufficient; extend if a non-Python case surfaces.
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("add_function.anchor.file missing"))?;
+            let Some(text) = tree.get(&PathBuf::from(file)) else {
+                return Ok(false);
+            };
+            let needle = format!("def {}(", name);
+            Ok(text.contains(&needle))
+        }
         Op::DeleteFunction { anchor } => {
             let file = anchor
                 .get("file")
@@ -367,6 +408,24 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
                     _ => true,
                 }
             }))
+        }
+        Op::RetypeBinding { anchor, from, to, .. } => {
+            // Already applied iff the file no longer has the `from`
+            // declaration for this variable and already has `to`.
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("retype_binding.anchor.file missing"))?;
+            let variable = anchor
+                .get("variable")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow!("retype_binding.anchor.variable missing"))?;
+            let Some(text) = tree.get(&PathBuf::from(file)) else {
+                return Ok(false);
+            };
+            let from_needle = format!("{} {}", from, variable);
+            let to_needle = format!("{} {}", to, variable);
+            Ok(!text.contains(&from_needle) && text.contains(&to_needle))
         }
         Op::ExtractFunction { source, new_name, .. } => {
             // Already applied iff the destination helper already exists
@@ -873,6 +932,26 @@ fn collect_rewrites(ops: &[Op], base_tree: &Tree) -> Result<Rewrites> {
             Op::RenameCssClass { scope, old, new } if scope == "project" => {
                 r.class_renames.push((old.clone(), new.clone()));
             }
+            Op::RetypeBinding { anchor, from, to, .. } => {
+                let file = anchor
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let variable = anchor
+                    .get("variable")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !file.is_empty() && !variable.is_empty() {
+                    r.retypes.push(RetypeEntry {
+                        file,
+                        from: from.clone(),
+                        to: to.clone(),
+                        variable,
+                    });
+                }
+            }
             Op::ExtractFunction {
                 source, body_range, new_name, moved_text: serialized_moved, ..
             } => {
@@ -994,9 +1073,20 @@ fn rewrite_b_op(op: Op, r: &Rewrites) -> Result<Op> {
                 .unwrap_or("")
                 .to_string();
             let mut source = source;
+            let mut after = after;
             for rn in &r.symbol_renames {
                 if rn.file == file {
                     source = rename_word_boundary(&source, &rn.old, &rn.new);
+                    // The `after` anchor names a sibling function that A
+                    // may have renamed — propagate.
+                    if let Some(obj) = after.as_object_mut() {
+                        if obj.get("name").and_then(|v| v.as_str()) == Some(rn.old.as_str()) {
+                            obj.insert(
+                                "name".to_string(),
+                                serde_json::Value::String(rn.new.clone()),
+                            );
+                        }
+                    }
                 }
             }
             Op::AddFunction { anchor, after, name, source }
@@ -1077,6 +1167,27 @@ fn rewrite_b_op(op: Op, r: &Rewrites) -> Result<Op> {
                 }
                 for (old, new) in &r.project_symbol_renames {
                     content = rename_word_boundary(&content, old, new);
+                }
+            }
+
+            // (1b) Retype_binding propagates to needles that reference the
+            // pre-retype declaration. `let foo = ...` → `const foo = ...`
+            // means a needle containing `let foo` must become `const foo`.
+            for rt in &r.retypes {
+                if rt.file != file {
+                    continue;
+                }
+                if let Some(needle) = anchor
+                    .get("after_line_contains")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                {
+                    let from_prefix = format!("{} {}", rt.from, rt.variable);
+                    let to_prefix = format!("{} {}", rt.to, rt.variable);
+                    if needle.contains(&from_prefix) {
+                        let rewritten = needle.replace(&from_prefix, &to_prefix);
+                        set_needle(&mut anchor, rewritten);
+                    }
                 }
             }
 

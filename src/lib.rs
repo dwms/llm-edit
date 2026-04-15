@@ -420,17 +420,54 @@ pub fn rename_html_class_attr(text: &str, old: &str, new: &str) -> String {
 /// statement; appends with PEP 8's two-blank-line separator.
 fn insert_function_after(text: &str, after_name: &str, source: &str) -> Result<String> {
     let marker = format!("def {}(", after_name);
-    if !text.contains(&marker) {
-        return Err(anyhow!("after function `{}` not found", after_name));
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let def_idx = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with(&marker))
+        .ok_or_else(|| anyhow!("after function `{}` not found", after_name))?;
+    let fn_indent = lines[def_idx].len() - lines[def_idx].trim_start().len();
+    // Where to land the new function: after the target's body AND after
+    // any sibling `def` at the same indent (so repeated "after X" inserts
+    // stack in log-order, and cross-agent inserts preserve A-then-B), but
+    // before any non-def top-level construct (imports at bottom, module
+    // assignments like `_store = {}`) so trailing module-level code
+    // stays where it was.
+    let mut end = lines.len();
+    for j in (def_idx + 1)..lines.len() {
+        let line = lines[j];
+        let stripped = line.trim_end_matches(['\n', '\r']);
+        let is_blank = stripped.trim().is_empty();
+        if is_blank {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        if indent > fn_indent {
+            continue; // inside some function's body
+        }
+        if indent == fn_indent && stripped.trim_start().starts_with("def ") {
+            continue; // sibling def: skip past it
+        }
+        end = j;
+        break;
     }
-    // We assume the named function is the last top-level def in the file
-    // (v0 constraint; matches our fixture). Append source after a blank-line gap.
-    let mut out = text.to_string();
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str("\n\n"); // two blank lines between top-level defs (PEP 8)
+    // Gather head (up to and including the function's body), then compose
+    // the insertion with PEP 8-style two-blank-line separator, then the
+    // remainder of the file.
+    let head: String = lines[..end].concat();
+    let tail: String = lines[end..].concat();
+    let mut out = String::with_capacity(text.len() + source.len() + 4);
+    out.push_str(head.trim_end_matches('\n'));
+    out.push_str("\n\n\n");
     out.push_str(source);
+    if !tail.is_empty() {
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        // Two blank lines between the inserted def and the following
+        // top-level content (PEP 8 mirror of what we do on the leading side).
+        out.push_str("\n\n");
+        out.push_str(&tail);
+    }
     Ok(out)
 }
 
