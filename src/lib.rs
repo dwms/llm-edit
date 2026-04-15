@@ -13,16 +13,19 @@ pub type Tree = BTreeMap<PathBuf, String>;
 
 pub fn load_tree(root: &Path) -> Result<Tree> {
     let mut tree = Tree::new();
-    for entry in WalkDir::new(root) {
+    for entry in WalkDir::new(root).into_iter().filter_entry(|e| {
+        // Skip `.git/` and `.llm-edit/` subtrees up front — they contain
+        // binary/opaque content the applier must not touch, and walking
+        // into them on every load makes real-repo invocations crash on
+        // git's packed objects.
+        let name = e.file_name().to_string_lossy();
+        name != ".git" && name != ".llm-edit"
+    }) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
         }
         let rel = entry.path().strip_prefix(root)?.to_path_buf();
-        // Skip the op-log itself when loading base/agent trees.
-        if rel.starts_with(".llm-edit") {
-            continue;
-        }
         let text = std::fs::read_to_string(entry.path())
             .with_context(|| format!("read {}", entry.path().display()))?;
         tree.insert(rel, text);

@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use llm_edit::cli::{apply_op_json, merge_worktrees};
+use llm_edit::cli::{apply_op_json, merge_worktrees, run_git_merge, run_merge_driver};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -64,6 +64,34 @@ enum Cmd {
         #[arg(long)]
         output: PathBuf,
     },
+    /// Git-integrated merge. Run from a clean working tree on the
+    /// target branch. Reads both sides' trees + `.llm-edit/log.jsonl`
+    /// from git's object store, merges via the structured-op merger,
+    /// writes merged files and merged log to the working tree, and
+    /// (by default) creates a merge commit with two parents.
+    #[command(name = "git-merge")]
+    GitMerge {
+        branch: String,
+        /// Skip the final `git commit`. Leaves the merged tree staged
+        /// in the working directory for inspection.
+        #[arg(long)]
+        no_commit: bool,
+    },
+    /// (Experimental) Git merge-driver entry point. Intended for
+    /// `.gitattributes merge=llm-edit`, but git sets `.git/MERGE_HEAD`
+    /// only AFTER per-file drivers run, so this variant can't yet do
+    /// cross-file propagation reliably. Prefer `git-merge`.
+    #[command(name = "merge-driver")]
+    MergeDriver {
+        #[arg(long)]
+        base: PathBuf,
+        #[arg(long)]
+        ours: PathBuf,
+        #[arg(long)]
+        theirs: PathBuf,
+        #[arg(long)]
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -71,12 +99,23 @@ fn main() -> Result<()> {
     let cwd = args
         .cwd
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
-    // Merge is the one subcommand that isn't a single-op apply.
-    if let Cmd::Merge { base, ours, theirs, output } = args.cmd {
-        return merge_worktrees(&base, &ours, &theirs, &output);
+    // Non-apply subcommands that don't build a single op:
+    match args.cmd {
+        Cmd::Merge { base, ours, theirs, output } => {
+            return merge_worktrees(&base, &ours, &theirs, &output);
+        }
+        Cmd::GitMerge { branch, no_commit } => {
+            let code = run_git_merge(&branch, !no_commit)?;
+            std::process::exit(code);
+        }
+        Cmd::MergeDriver { base, ours, theirs, path } => {
+            let code = run_merge_driver(&base, &ours, &theirs, &path)?;
+            std::process::exit(code);
+        }
+        _ => {}
     }
     let json = match args.cmd {
-        Cmd::Merge { .. } => unreachable!(),
+        Cmd::Merge { .. } | Cmd::GitMerge { .. } | Cmd::MergeDriver { .. } => unreachable!(),
         Cmd::Apply { json } => json,
         Cmd::RenameSymbol { file, old, new } => json!({
             "op": "rename_symbol",
