@@ -1,0 +1,1 @@
+{"op":"add_function","anchor":{"file":"api.py","path":["module"]},"after":{"kind":"function_def","name":"entry"},"name":"wrapper","source":"def wrapper(x):\n    return legacy(x)\n"}
