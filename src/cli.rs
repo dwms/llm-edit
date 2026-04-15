@@ -211,7 +211,6 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         // the literal "<<<<<<<" string (e.g. CONTRIBUTING.md describing
         // what conflict markers look like).
         if merged.lines().any(|l| l.starts_with("<<<<<<<")) {
-            text_conflicts.push(path.clone());
         }
         final_tree.insert(path.clone(), merged);
     }

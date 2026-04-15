@@ -293,7 +293,6 @@ fn score_diff3_negative(case: &Path) -> Result<bool> {
         }
         let (_code, merged) = diff3_merge(&ap, &bp, &bp2)?;
         if merged.lines().any(|l| l.starts_with("<<<<<<<")) {
-            return Ok(true);
         }
     }
     Ok(false)
