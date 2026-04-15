@@ -1,1 +1,0 @@
-{"kind":"delete_vs_new_caller","file":"lib.py","deleted":"legacy","caller":"wrapper"}

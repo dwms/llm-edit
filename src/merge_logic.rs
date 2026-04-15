@@ -480,30 +480,30 @@ fn contains_word(text: &str, word: &str) -> bool {
     false
 }
 
-/// Word-boundary call-site match: matches `word` as a whole identifier that is
-/// immediately followed by `(`. Used by the `DeleteVsNewCaller` detector so
-/// `legacy(` is not falsely matched by `legacy_handler(`.
-fn contains_word_call(text: &str, word: &str) -> bool {
-    if word.is_empty() {
-        return false;
-    }
-    let bytes = text.as_bytes();
-    let wb = word.as_bytes();
-    let is_wordy = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    let mut i = 0;
-    while i + wb.len() < bytes.len() {
-        if &bytes[i..i + wb.len()] == wb {
-            let before_ok = i == 0 || !is_wordy(bytes[i - 1]);
-            let after_ok = bytes[i + wb.len()] == b'(';
-            if before_ok && after_ok {
-                return true;
-            }
+/// True when the contiguous run of leading `import` / `from … import` lines
+/// is already alphabetically ordered. Used by `op_is_noop_against` for
+/// `sort_block` dedup.
+fn import_block_is_sorted(text: &str) -> bool {
+    let mut block: Vec<&str> = Vec::new();
+    let mut started = false;
+    for l in text.lines() {
+        let t = l.trim_start();
+        let is_import = t.starts_with("import ") || t.starts_with("from ");
+        if is_import {
+            block.push(l);
+            started = true;
+        } else if started {
+            break;
         }
-        i += 1;
     }
-    false
+    if block.len() < 2 {
+        return true;
+    }
+    block.windows(2).all(|w| w[0].trim() <= w[1].trim())
 }
 
+fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
+    let mut out = Vec::new();
 
     for a in ops_a {
         if let Op::RenameSymbol { scope: a_scope, file: a_file, old: a_old, new: a_new, .. } = a {
@@ -704,20 +704,22 @@ fn contains_word_call(text: &str, word: &str) -> bool {
                         Ok(n) => n,
                         Err(_) => continue,
                     };
+                    let needle = format!("{}(", deleted);
                     for b in add_ops {
                         if let Op::AddFunction {
-                            anchor: _b_anc,
+                            anchor: b_anc,
                             name,
                             source,
                             ..
                         } = b
                         {
-                            // Cross-file: a new caller in any file referencing
-                            // the deleted name still constitutes a conflict.
-                            // Word-boundary match on the name, then confirm a
-                            // `(` follows to avoid false positives like
-                            // `legacy_handler(` matching a deleted `legacy`.
-                            if contains_word_call(source, &deleted) {
+                            let b_file = b_anc
+                                .get("file")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            if b_file == file && source.contains(&needle) {
+                                out.push(ConflictReport::DeleteVsNewCaller {
                                     file: file.clone(),
                                     deleted: deleted.clone(),
                                     caller: name.clone(),
