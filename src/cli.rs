@@ -659,6 +659,265 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
     Ok(0)
 }
 
+/// Replay every commit on the current branch (between `merge-base(HEAD, onto)`
+/// and `HEAD`) onto `onto`, using llm-edit's hybrid merger to compose
+/// each commit's changes with whatever's already been applied during
+/// the rebase. Branch ref ends up pointing at the new tip; working
+/// tree is reset to match.
+///
+/// On semantic OR text conflict during any commit's replay, leaves
+/// HEAD detached at the partially-rebased state so the user can
+/// inspect / resolve, and returns 1. (No `--continue` / `--abort`
+/// support yet — tracked on #42 as future work.)
+pub fn run_git_rebase(onto: &str) -> Result<i32> {
+    let head_branch = git_cmd(&["symbolic-ref", "--short", "HEAD"])?
+        .trim()
+        .to_string();
+    let head_sha = git_cmd(&["rev-parse", "HEAD"])?.trim().to_string();
+    let onto_sha = git_cmd(&["rev-parse", onto])?.trim().to_string();
+    let base_sha = git_cmd(&["merge-base", &head_sha, &onto_sha])?
+        .trim()
+        .to_string();
+
+    if base_sha == head_sha {
+        eprintln!("llm-edit git-rebase: HEAD is already an ancestor of {} — nothing to rebase", onto);
+        return Ok(0);
+    }
+    if base_sha == onto_sha {
+        eprintln!("llm-edit git-rebase: already up to date ({} merged into HEAD)", onto);
+        return Ok(0);
+    }
+
+    let commits_str = git_cmd(&[
+        "log",
+        "--format=%H",
+        "--reverse",
+        &format!("{}..{}", base_sha, head_sha),
+    ])?;
+    let commits: Vec<String> = commits_str
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+
+    if commits.is_empty() {
+        return Ok(0);
+    }
+
+    // Detach HEAD onto the new base so we can build commits via
+    // `commit-tree` + `update-ref HEAD` cleanly. We'll restore the
+    // branch ref at the end (or on error, leave HEAD detached for
+    // user resolution).
+    git_cmd(&["checkout", "--quiet", "--detach", &onto_sha])?;
+
+    let mut rebase_head = onto_sha.clone();
+    for (i, commit) in commits.iter().enumerate() {
+        let parent_sha = git_cmd(&["rev-parse", &format!("{}^", commit)])?
+            .trim()
+            .to_string();
+        let msg = git_cmd(&["log", "-1", "--format=%B", commit])?
+            .trim_end_matches('\n')
+            .to_string();
+        let short = &commit[..8];
+
+        match rebase_step(&parent_sha, &rebase_head, commit)? {
+            RebaseStep::Clean { tree, log, fallback_files } => {
+                if !fallback_files.is_empty() {
+                    eprintln!(
+                        "  [{}/{}] {} ({} text-fallback file(s))",
+                        i + 1,
+                        commits.len(),
+                        short,
+                        fallback_files.len()
+                    );
+                } else {
+                    eprintln!("  [{}/{}] {}", i + 1, commits.len(), short);
+                }
+                // Materialize the merged tree onto disk + index, then
+                // commit. read-tree --reset -u clears the index/wd to
+                // the rebase_head state first; we then write the
+                // merged content over it.
+                git_cmd(&["read-tree", "--reset", "-u", &rebase_head])?;
+                let repo_root = repo_root()?;
+                for (rel, content) in &tree {
+                    let abs = repo_root.join(rel);
+                    if let Some(parent) = abs.parent() {
+                        std::fs::create_dir_all(parent).ok();
+                    }
+                    std::fs::write(&abs, content)?;
+                }
+                // Persist merged log alongside source.
+                let abs_log = repo_root.join(".llm-edit/log.jsonl");
+                std::fs::create_dir_all(abs_log.parent().unwrap())?;
+                let mut full_log = String::new();
+                for op in &log {
+                    full_log.push_str(&serde_json::to_string(op)?);
+                    full_log.push('\n');
+                }
+                std::fs::write(&abs_log, full_log)?;
+
+                git_cmd(&["add", "-A"])?;
+                let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
+                let new_commit = git_cmd(&[
+                    "commit-tree",
+                    &tree_sha,
+                    "-p",
+                    &rebase_head,
+                    "-m",
+                    &msg,
+                ])?
+                .trim()
+                .to_string();
+                git_cmd(&["update-ref", "HEAD", &new_commit])?;
+                rebase_head = new_commit;
+            }
+            RebaseStep::Conflict { reason } => {
+                eprintln!(
+                    "llm-edit git-rebase: conflict on {} ({} of {}): {}",
+                    short,
+                    i + 1,
+                    commits.len(),
+                    reason
+                );
+                eprintln!(
+                    "  HEAD left detached at rebased tip {}; original branch '{}' unchanged.",
+                    &rebase_head[..8],
+                    head_branch
+                );
+                eprintln!("  Resolve manually or `git checkout {}` to abort.", head_branch);
+                return Ok(1);
+            }
+        }
+    }
+
+    // All commits replayed cleanly. Move the branch to the new tip and
+    // re-attach HEAD.
+    git_cmd(&[
+        "update-ref",
+        &format!("refs/heads/{}", head_branch),
+        &rebase_head,
+    ])?;
+    git_cmd(&["checkout", "--quiet", &head_branch])?;
+
+    eprintln!(
+        "llm-edit git-rebase: replayed {} commit(s) onto {} ({})",
+        commits.len(),
+        onto,
+        &onto_sha[..8]
+    );
+    Ok(0)
+}
+
+enum RebaseStep {
+    Clean {
+        tree: Tree,
+        log: Vec<Op>,
+        fallback_files: Vec<PathBuf>,
+    },
+    Conflict {
+        reason: String,
+    },
+}
+
+/// One rebase step: hybrid-merge `theirs` (the commit being replayed)
+/// into `ours` (the in-progress rebase tip) on top of `base` (theirs's
+/// original parent). Mirrors `run_git_merge`'s hybrid logic but
+/// without committing — caller does that.
+fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<RebaseStep> {
+    let base_tree_raw = git_extract_tree(base_sha)?;
+    let ours_tree_raw = git_extract_tree(ours_sha)?;
+    let theirs_tree_raw = git_extract_tree(theirs_sha)?;
+
+    let log_path = PathBuf::from(".llm-edit/log.jsonl");
+    let base_log = base_tree_raw.get(&log_path).cloned().unwrap_or_default();
+    let ours_log = ours_tree_raw.get(&log_path).cloned().unwrap_or_default();
+    let theirs_log = theirs_tree_raw.get(&log_path).cloned().unwrap_or_default();
+
+    let base_ops_count = parse_log(&base_log)?.len();
+    let ours_ops: Vec<Op> = parse_log(&ours_log)?.into_iter().skip(base_ops_count).collect();
+    let theirs_ops: Vec<Op> = parse_log(&theirs_log)?.into_iter().skip(base_ops_count).collect();
+
+    let strip_meta = |t: &Tree| -> Tree {
+        t.iter()
+            .filter(|(p, _)| !p.starts_with(".llm-edit"))
+            .map(|(p, t)| (p.clone(), t.clone()))
+            .collect()
+    };
+    let base_tree = strip_meta(&base_tree_raw);
+    let ours_tree = strip_meta(&ours_tree_raw);
+    let theirs_tree = strip_meta(&theirs_tree_raw);
+
+    let mut expected_a = base_tree.clone();
+    let _ = apply_log(&mut expected_a, &ours_ops);
+    let mut expected_b = base_tree.clone();
+    let _ = apply_log(&mut expected_b, &theirs_ops);
+
+    let outcome = merge_trees_and_ops(base_tree.clone(), &ours_ops, &theirs_ops)?;
+    let (semantic_tree, merged_log_ops) = match outcome {
+        MergeResult::Merged { tree, log } => (tree, log),
+        MergeResult::Conflicts(reports) => {
+            return Ok(RebaseStep::Conflict {
+                reason: format!(
+                    "{} semantic conflict(s): {}",
+                    reports.len(),
+                    reports
+                        .iter()
+                        .map(|r| serde_json::to_string(r).unwrap_or_default())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            });
+        }
+    };
+
+    let all_files: std::collections::BTreeSet<PathBuf> = base_tree
+        .keys()
+        .chain(ours_tree.keys())
+        .chain(theirs_tree.keys())
+        .cloned()
+        .collect();
+
+    let mut final_tree: Tree = Tree::new();
+    let mut fallback_files: Vec<PathBuf> = Vec::new();
+
+    for path in &all_files {
+        let a_covered = expected_a.get(path) == ours_tree.get(path);
+        let b_covered = expected_b.get(path) == theirs_tree.get(path);
+
+        if a_covered && b_covered {
+            if let Some(content) = semantic_tree.get(path) {
+                final_tree.insert(path.clone(), content.clone());
+            }
+            continue;
+        }
+
+        fallback_files.push(path.clone());
+        let base_c = base_tree.get(path).cloned().unwrap_or_default();
+        let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
+        let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
+        let merged = diff3_merge_strings(&ours_c, &base_c, &theirs_c)?;
+        let has_markers = merged.lines().any(|l| l.starts_with("<<<<<<<"));
+        let parse_ok = parses_cleanly(path, &merged);
+        if has_markers || !parse_ok {
+            return Ok(RebaseStep::Conflict {
+                reason: format!(
+                    "text-fallback conflict in {} (markers={}, parse_ok={})",
+                    path.display(),
+                    has_markers,
+                    parse_ok
+                ),
+            });
+        }
+        final_tree.insert(path.clone(), merged);
+    }
+
+    Ok(RebaseStep::Clean {
+        tree: final_tree,
+        log: merged_log_ops,
+        fallback_files,
+    })
+}
+
 /// 3-way text merge via `diff3 -m`. Tmpfiles for inputs; output is
 /// the merged string (possibly containing conflict markers).
 /// True when `text` parses cleanly under the tree-sitter grammar for

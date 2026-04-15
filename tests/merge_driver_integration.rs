@@ -310,3 +310,82 @@ fn infer_detects_python_structural_diffs() {
     assert!(log.contains("\"name\":\"baz\""), "add should reference baz:\n{}", log);
     assert!(log.contains("\"module\":\"sys\""), "add_import should reference sys:\n{}", log);
 }
+
+/// `llm-edit git-rebase` replays the current branch's commits onto a
+/// new base, with each commit's recorded ops getting rewritten through
+/// the new base's own ops.
+#[test]
+fn git_rebase_replays_commits_with_op_propagation() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    fs::write(
+        repo.join("app.py"),
+        "def get(user_id):\n    return user_id\n",
+    )
+    .unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    // Branch `feat` adds a caller that uses the OLD name.
+    run("git", &["checkout", "-b", "feat", "-q"], repo);
+    run_llm_edit(
+        &[
+            "apply",
+            "--json",
+            r#"{"op":"add_function","anchor":{"file":"app.py","path":["module"]},"after":{"kind":"function_def","name":"get"},"name":"caller","source":"def caller():\n    return get(user_id=1)\n"}"#,
+        ],
+        repo,
+    );
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "feat: add caller"], repo);
+
+    // Back to main: rename user_id → account_id.
+    run("git", &["checkout", "main", "-q"], repo);
+    run_llm_edit(
+        &["rename-symbol", "--file", "app.py", "user_id", "account_id"],
+        repo,
+    );
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "main: rename"], repo);
+
+    // Switch to feat and rebase onto main.
+    run("git", &["checkout", "feat", "-q"], repo);
+    run_llm_edit(&["git-rebase", "main"], repo);
+
+    // After rebase, app.py should contain BOTH the rename (from main)
+    // AND the caller (from feat, with rename propagated into its body).
+    let app = fs::read_to_string(repo.join("app.py")).unwrap();
+    assert!(
+        app.contains("def get(account_id):"),
+        "rename not preserved post-rebase:\n{}",
+        app
+    );
+    assert!(app.contains("def caller():"), "caller missing:\n{}", app);
+    assert!(
+        app.contains("return get(account_id=1)"),
+        "caller's call-site not rewritten through propagated rename:\n{}",
+        app
+    );
+
+    // History should be linear: main's tip, then feat's commit on top.
+    let history = Command::new("git")
+        .args(["log", "--format=%s", "feat"])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    let history_text = String::from_utf8(history.stdout).unwrap();
+    let commits: Vec<&str> = history_text.lines().collect();
+    assert_eq!(
+        commits,
+        vec!["feat: add caller", "main: rename", "base"],
+        "rebase produced wrong commit history:\n{}",
+        history_text
+    );
+}

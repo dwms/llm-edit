@@ -5,7 +5,9 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use llm_edit::cli::{apply_op_json, merge_worktrees, run_git_merge, run_infer, run_merge_driver};
+use llm_edit::cli::{
+    apply_op_json, merge_worktrees, run_git_merge, run_git_rebase, run_infer, run_merge_driver,
+};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -84,6 +86,15 @@ enum Cmd {
     /// files on disk are not modified. Run AFTER editing, BEFORE
     /// committing, so the commit captures both source + log.
     Infer,
+    /// Replay every commit on the current branch onto a new base,
+    /// composing each commit's changes via the structured-op merger.
+    /// Each commit becomes a single-parent commit on top of the new
+    /// base; original commit shas are abandoned. On conflict, leaves
+    /// HEAD detached at the partially-rebased state.
+    #[command(name = "git-rebase")]
+    GitRebase {
+        onto: String,
+    },
     /// (Experimental) Git merge-driver entry point. Intended for
     /// `.gitattributes merge=llm-edit`, but git sets `.git/MERGE_HEAD`
     /// only AFTER per-file drivers run, so this variant can't yet do
@@ -124,10 +135,18 @@ fn main() -> Result<()> {
             println!("inferred {} op(s); {} file(s) had no detectable pattern", inferred, skipped);
             return Ok(());
         }
+        Cmd::GitRebase { onto } => {
+            let code = run_git_rebase(&onto)?;
+            std::process::exit(code);
+        }
         _ => {}
     }
     let json = match args.cmd {
-        Cmd::Merge { .. } | Cmd::GitMerge { .. } | Cmd::MergeDriver { .. } | Cmd::Infer => unreachable!(),
+        Cmd::Merge { .. }
+        | Cmd::GitMerge { .. }
+        | Cmd::MergeDriver { .. }
+        | Cmd::Infer
+        | Cmd::GitRebase { .. } => unreachable!(),
         Cmd::Apply { json } => json,
         Cmd::RenameSymbol { file, old, new } => json!({
             "op": "rename_symbol",
