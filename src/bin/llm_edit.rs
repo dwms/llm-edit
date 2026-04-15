@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use llm_edit::cli::apply_op_json;
+use llm_edit::cli::{apply_op_json, merge_worktrees};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -50,6 +50,20 @@ enum Cmd {
         #[arg(long)]
         file: String,
     },
+    /// Merge two worktrees on top of a common base, persist merged
+    /// source + merged op-log to `--output`. Use this in place of
+    /// `git merge` / `diff3 -m` when both sides carry an `.llm-edit/`
+    /// log — the persistence lets later merges reuse today's decisions.
+    Merge {
+        #[arg(long)]
+        base: PathBuf,
+        #[arg(long)]
+        ours: PathBuf,
+        #[arg(long)]
+        theirs: PathBuf,
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -57,7 +71,12 @@ fn main() -> Result<()> {
     let cwd = args
         .cwd
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
+    // Merge is the one subcommand that isn't a single-op apply.
+    if let Cmd::Merge { base, ours, theirs, output } = args.cmd {
+        return merge_worktrees(&base, &ours, &theirs, &output);
+    }
     let json = match args.cmd {
+        Cmd::Merge { .. } => unreachable!(),
         Cmd::Apply { json } => json,
         Cmd::RenameSymbol { file, old, new } => json!({
             "op": "rename_symbol",
