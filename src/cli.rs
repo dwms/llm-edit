@@ -290,6 +290,7 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         .trim()
         .to_string();
         git_cmd(&["update-ref", "HEAD", &commit_sha])?;
+    }
 
     Ok(0)
 }
