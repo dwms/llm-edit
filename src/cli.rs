@@ -34,6 +34,56 @@ pub fn apply_op_json(cwd: &Path, op_json: &str) -> Result<()> {
     Ok(())
 }
 
+/// Record a `delete_node` op that targets a comment identified by
+/// content-hash (not positional index). Computes a stable `node_id` from
+/// `(fn_name, normalized comment text)`, persists it to
+/// `.llm-edit/nodes.json` as the registry, emits an op carrying the
+/// `node_id` plus the inline text the applier needs, and applies the
+/// delete. Survives concurrent inserts of sibling comments that would
+/// drift a positional `{kind: "comment", index: N}` anchor.
+pub fn record_delete_comment(cwd: &Path, file: &str, fn_name: &str, comment_text: &str) -> Result<()> {
+    let node_id = crate::comment_node_id(fn_name, comment_text);
+    let normalized = crate::normalize_comment_text(comment_text);
+
+    // Persist the node entry in .llm-edit/nodes.json (the registry).
+    // Map shape: { node_id: {file, kind, parent_fn, text} }.
+    let nodes_path = cwd.join(".llm-edit/nodes.json");
+    std::fs::create_dir_all(cwd.join(".llm-edit"))?;
+    let mut nodes: serde_json::Value = if nodes_path.exists() {
+        let raw = std::fs::read_to_string(&nodes_path)
+            .with_context(|| format!("read {}", nodes_path.display()))?;
+        serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    if let Some(map) = nodes.as_object_mut() {
+        map.insert(
+            node_id.clone(),
+            serde_json::json!({
+                "file": file,
+                "kind": "comment",
+                "parent_fn": fn_name,
+                "text": normalized,
+            }),
+        );
+    }
+    std::fs::write(&nodes_path, serde_json::to_string_pretty(&nodes)?)?;
+
+    // Emit the op. The anchor carries `text` inline so the applier does
+    // not have to cross-reference nodes.json during apply; nodes.json is
+    // the registry/audit log, the op is self-describing.
+    let op = serde_json::json!({
+        "op": "delete_node",
+        "anchor": {
+            "file": file,
+            "node_id": node_id,
+            "parent_fn": fn_name,
+            "text": normalized,
+        }
+    });
+    apply_op_json(cwd, &op.to_string())
+}
+
 /// Merge two worktrees on top of `base` and write merged source + log
 /// to `output`. On conflict, writes `output/.llm-edit/conflicts.txt` and
 /// returns an error.

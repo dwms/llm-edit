@@ -136,12 +136,30 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
         }
         Op::DeleteNode { anchor } => {
             let file = anchor_file(anchor)?;
+            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            // New content-hash anchor form: {file, node_id, parent_fn, text}.
+            // The applier locates the matching comment by (parent_fn, normalized text)
+            // regardless of its positional index in the fn body. This survives
+            // a concurrent insert-before that would have drifted the positional
+            // `{kind: "comment", index: N}` anchor.
+            if anchor.get("node_id").is_some() {
+                let parent_fn = anchor
+                    .get("parent_fn")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("delete_node by node_id: anchor.parent_fn missing"))?;
+                let target = anchor
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| anyhow!("delete_node by node_id: anchor.text missing"))?;
+                *text = delete_comment_by_text_in_fn(text, parent_fn, target)?;
+                return Ok(());
+            }
+            // Positional path (backward compatible).
             let fn_name = anchor_path_fn_name(anchor)?;
             let (kind, idx) = anchor_path_last_kind_index(anchor)?;
             if kind != "comment" {
                 return Err(anyhow!("delete_node v0 only supports kind=comment"));
             }
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = delete_nth_comment_in_fn(text, &fn_name, idx)?;
             Ok(())
         }
@@ -1009,6 +1027,79 @@ fn delete_nth_comment_in_fn(text: &str, fn_name: &str, n: usize) -> Result<Strin
         i += 1;
     }
     let di = delete_line.ok_or_else(|| anyhow!("comment index {} not found", n))?;
+    let mut out = String::with_capacity(text.len());
+    for (j, l) in lines.iter().enumerate() {
+        if j != di {
+            out.push_str(l);
+        }
+    }
+    Ok(out)
+}
+
+/// Normalize a comment's text for hashing / equality: trim leading `#`,
+/// strip surrounding whitespace. Two comments with identical semantic
+/// content but different incidental whitespace hash to the same id.
+pub fn normalize_comment_text(raw: &str) -> String {
+    let s = raw.trim();
+    let s = s.strip_prefix('#').unwrap_or(s);
+    s.trim().to_string()
+}
+
+/// Compute a 12-hex-char content id for a comment node under a parent fn.
+/// Identity = (parent_id, node_kind, normalized_text). SHA-256 truncated to
+/// 12 hex chars (48 bits) — collision resistance is sufficient within a
+/// single worktree where nodes.json acts as the registry and any collision
+/// would be caught at record time.
+pub fn comment_node_id(parent_fn: &str, raw_text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = normalize_comment_text(raw_text);
+    let mut h = Sha256::new();
+    h.update(parent_fn.as_bytes());
+    h.update(b"|comment|");
+    h.update(normalized.as_bytes());
+    let digest = h.finalize();
+    hex::encode(&digest[..6])
+}
+
+/// Delete the first comment in `fn_name`'s body whose normalized text equals
+/// `target_text` (also normalized). Returns an error if not found — that's a
+/// semantic conflict surface for the merger.
+fn delete_comment_by_text_in_fn(text: &str, fn_name: &str, target_text: &str) -> Result<String> {
+    let needle = normalize_comment_text(target_text);
+    let lines: Vec<&str> = text.split_inclusive('\n').collect();
+    let def_prefix = format!("def {}(", fn_name);
+    let def_idx = lines
+        .iter()
+        .position(|l| l.trim_start().starts_with(&def_prefix))
+        .ok_or_else(|| anyhow!("def {} not found", fn_name))?;
+    let fn_indent_cols = lines[def_idx].len() - lines[def_idx].trim_start().len();
+    let body_indent_cols = fn_indent_cols + 4;
+
+    let mut delete_line: Option<usize> = None;
+    let mut i = def_idx + 1;
+    while i < lines.len() {
+        let line = lines[i];
+        let stripped = line.trim_end_matches(['\n', '\r']);
+        let is_blank = stripped.trim().is_empty();
+        let indent_cols = line.len() - line.trim_start().len();
+        if !is_blank && indent_cols < body_indent_cols {
+            break;
+        }
+        if !is_blank && indent_cols == body_indent_cols && stripped.trim_start().starts_with('#') {
+            if normalize_comment_text(stripped.trim_start()) == needle {
+                delete_line = Some(i);
+                break;
+            }
+        }
+        i += 1;
+    }
+    let di = delete_line.ok_or_else(|| {
+        anyhow!(
+            "delete_node: no comment matching `{}` found in fn `{}`",
+            needle,
+            fn_name
+        )
+    })?;
     let mut out = String::with_capacity(text.len());
     for (j, l) in lines.iter().enumerate() {
         if j != di {

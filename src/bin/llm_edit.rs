@@ -6,7 +6,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use llm_edit::cli::{
-    apply_op_json, merge_worktrees, run_git_merge, run_git_rebase, run_infer, run_merge_driver,
+    apply_op_json, merge_worktrees, record_delete_comment, run_git_merge, run_git_rebase,
+    run_infer, run_merge_driver,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -51,6 +52,19 @@ enum Cmd {
     SortBlock {
         #[arg(long)]
         file: String,
+    },
+    /// Delete a comment inside a named function, identified by its text
+    /// content (hashed to a stable node_id). Survives concurrent
+    /// insert-before edits from another agent, which would otherwise
+    /// drift a positional `{kind: "comment", index: N}` anchor.
+    #[command(name = "delete-comment")]
+    DeleteComment {
+        #[arg(long)]
+        file: String,
+        #[arg(long, name = "fn")]
+        fn_name: String,
+        #[arg(long)]
+        text: String,
     },
     /// Merge two worktrees on top of a common base, persist merged
     /// source + merged op-log to `--output`. Use this in place of
@@ -139,6 +153,9 @@ fn main() -> Result<()> {
             let code = run_git_rebase(&onto)?;
             std::process::exit(code);
         }
+        Cmd::DeleteComment { file, fn_name, text } => {
+            return record_delete_comment(&cwd, &file, &fn_name, &text);
+        }
         _ => {}
     }
     let json = match args.cmd {
@@ -146,7 +163,8 @@ fn main() -> Result<()> {
         | Cmd::GitMerge { .. }
         | Cmd::MergeDriver { .. }
         | Cmd::Infer
-        | Cmd::GitRebase { .. } => unreachable!(),
+        | Cmd::GitRebase { .. }
+        | Cmd::DeleteComment { .. } => unreachable!(),
         Cmd::Apply { json } => json,
         Cmd::RenameSymbol { file, old, new } => json!({
             "op": "rename_symbol",
