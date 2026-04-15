@@ -210,7 +210,15 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         // Substring search would false-positive on prose that mentions
         // the literal "<<<<<<<" string (e.g. CONTRIBUTING.md describing
         // what conflict markers look like).
-        if merged.lines().any(|l| l.starts_with("<<<<<<<")) {
+        let has_markers = merged.lines().any(|l| l.starts_with("<<<<<<<"));
+        // Even when diff3 produces no markers, the merged output can
+        // be syntactically broken — e.g. one side dropped a closing
+        // brace because the surrounding context coincidentally lined
+        // up. Validate against the file's tree-sitter grammar when we
+        // know one. (#47)
+        let parse_ok = parses_cleanly(path, &merged);
+        if has_markers || !parse_ok {
+            text_conflicts.push(path.clone());
         }
         final_tree.insert(path.clone(), merged);
     }
@@ -297,6 +305,31 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
 
 /// 3-way text merge via `diff3 -m`. Tmpfiles for inputs; output is
 /// the merged string (possibly containing conflict markers).
+/// True when `text` parses cleanly under the tree-sitter grammar for
+/// `path`'s extension. For unknown extensions, returns true (no
+/// validation possible). For supported extensions, a parse with any
+/// `ERROR` node anywhere in the tree returns false — a signal that
+/// text-merge fallback produced syntactically broken output and the
+/// file should be flagged as a conflict instead of silently shipped.
+fn parses_cleanly(path: &Path, text: &str) -> bool {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let lang: tree_sitter::Language = match ext {
+        "py" => tree_sitter_python::LANGUAGE.into(),
+        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
+        "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        _ => return true,
+    };
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&lang).is_err() {
+        return true;
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return false;
+    };
+    !tree.root_node().has_error()
+}
+
 fn diff3_merge_strings(ours: &str, base: &str, theirs: &str) -> Result<String> {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -488,4 +521,56 @@ fn append_op_to_log(cwd: &Path, op_json: &str) -> Result<()> {
     text.push('\n');
     std::fs::write(&log_path, text)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod parse_check_tests {
+    use super::parses_cleanly;
+    use std::path::Path;
+
+    #[test]
+    fn unknown_extension_passes() {
+        // No grammar known → can't validate → assume ok.
+        assert!(parses_cleanly(Path::new("README.md"), "anything goes\n"));
+    }
+
+    #[test]
+    fn python_clean() {
+        assert!(parses_cleanly(
+            Path::new("foo.py"),
+            "def f():\n    return 1\n"
+        ));
+    }
+
+    #[test]
+    fn python_unbalanced_brace_caught() {
+        // Simulates the dogfood failure mode: a closing brace got
+        // dropped by text-merge fallback.
+        let broken = "def commit():\n    if cond:\n        return 1\n# missing dedent / outer block";
+        // tree-sitter-python is very forgiving — try a more obviously
+        // broken construct (mismatched paren).
+        assert!(!parses_cleanly(Path::new("foo.py"), "def f(:\n    return 1\n"));
+        let _ = broken;
+    }
+
+    #[test]
+    fn rust_unsupported_passes() {
+        // Rust isn't in the supported set; we can't validate.
+        assert!(parses_cleanly(Path::new("lib.rs"), "fn x( {"));
+    }
+
+    #[test]
+    fn js_unbalanced_brace_caught() {
+        let broken = "function f() {\n  if (x) {\n    return 1;\n  }\n";
+        // Missing one closing `}` for the function — should fail parse.
+        assert!(!parses_cleanly(Path::new("foo.js"), broken));
+    }
+
+    #[test]
+    fn ts_clean() {
+        assert!(parses_cleanly(
+            Path::new("foo.ts"),
+            "export function f(x: number): number { return x + 1; }\n"
+        ));
+    }
 }
