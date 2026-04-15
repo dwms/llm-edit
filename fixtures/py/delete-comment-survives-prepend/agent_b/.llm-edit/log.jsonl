@@ -1,0 +1,1 @@
+{"op":"insert_after","anchor":{"file":"calc.py","after_line_contains":"def total(items):"},"content":"    # new note"}

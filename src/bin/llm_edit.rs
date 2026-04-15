@@ -6,8 +6,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use llm_edit::cli::{
-    apply_op_json, merge_worktrees, run_git_merge, run_git_rebase, run_git_rebase_abort,
-    run_git_rebase_continue, run_infer, run_merge_driver,
+    apply_op_json, merge_worktrees, record_delete_comment, run_git_merge, run_git_rebase,
+    run_infer, run_merge_driver,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -53,6 +53,19 @@ enum Cmd {
         #[arg(long)]
         file: String,
     },
+    /// Delete a comment inside a named function, identified by its text
+    /// content (hashed to a stable node_id). Survives concurrent
+    /// insert-before edits from another agent, which would otherwise
+    /// drift a positional `{kind: "comment", index: N}` anchor.
+    #[command(name = "delete-comment")]
+    DeleteComment {
+        #[arg(long)]
+        file: String,
+        #[arg(long, name = "fn")]
+        fn_name: String,
+        #[arg(long)]
+        text: String,
+    },
     /// Merge two worktrees on top of a common base, persist merged
     /// source + merged op-log to `--output`. Use this in place of
     /// `git merge` / `diff3 -m` when both sides carry an `.llm-edit/`
@@ -94,17 +107,7 @@ enum Cmd {
     /// HEAD detached at the partially-rebased state.
     #[command(name = "git-rebase")]
     GitRebase {
-        /// New base to rebase the current branch onto. Omit with
-        /// `--continue` or `--abort` to resume / unwind a rebase that
-        /// stopped on conflict.
-        onto: Option<String>,
-        /// Resume a rebase that stopped on conflict. Assumes the user
-        /// has resolved the conflicted files on disk.
-        #[arg(long, conflicts_with_all = ["onto", "abort"])]
-        r#continue: bool,
-        /// Abort an in-progress rebase and restore the original branch.
-        #[arg(long, conflicts_with_all = ["onto", "continue"])]
-        abort: bool,
+        onto: String,
     },
     /// (Experimental) Git merge-driver entry point. Intended for
     /// `.gitattributes merge=llm-edit`, but git sets `.git/MERGE_HEAD`
@@ -146,18 +149,12 @@ fn main() -> Result<()> {
             println!("inferred {} op(s); {} file(s) had no detectable pattern", inferred, skipped);
             return Ok(());
         }
-        Cmd::GitRebase { onto, r#continue, abort } => {
-            let code = if abort {
-                run_git_rebase_abort()?
-            } else if r#continue {
-                run_git_rebase_continue()?
-            } else {
-                let onto = onto.ok_or_else(|| {
-                    anyhow::anyhow!("git-rebase requires <onto>, --continue, or --abort")
-                })?;
-                run_git_rebase(&onto)?
-            };
+        Cmd::GitRebase { onto } => {
+            let code = run_git_rebase(&onto)?;
             std::process::exit(code);
+        }
+        Cmd::DeleteComment { file, fn_name, text } => {
+            return record_delete_comment(&cwd, &file, &fn_name, &text);
         }
         _ => {}
     }
@@ -166,7 +163,8 @@ fn main() -> Result<()> {
         | Cmd::GitMerge { .. }
         | Cmd::MergeDriver { .. }
         | Cmd::Infer
-        | Cmd::GitRebase { .. } => unreachable!(),
+        | Cmd::GitRebase { .. }
+        | Cmd::DeleteComment { .. } => unreachable!(),
         Cmd::Apply { json } => json,
         Cmd::RenameSymbol { file, old, new } => json!({
             "op": "rename_symbol",
