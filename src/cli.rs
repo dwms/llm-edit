@@ -11,6 +11,55 @@ use crate::ops::{Op, parse_log};
 use crate::{Tree, apply_log, load_tree};
 use serde::{Deserialize, Serialize};
 
+/// Action for one entry in the interactive rebase todo. Mirrors a
+/// subset of `git rebase -i` vocabulary. `pick` is the default (same as
+/// the MVP non-interactive rebase).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum TodoAction {
+    Pick,
+    Drop,
+    Squash,
+    Fixup,
+    Reword,
+}
+
+impl TodoAction {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "pick" | "p" => Some(Self::Pick),
+            "drop" | "d" => Some(Self::Drop),
+            "squash" | "s" => Some(Self::Squash),
+            "fixup" | "f" => Some(Self::Fixup),
+            "reword" | "r" => Some(Self::Reword),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pick => "pick",
+            Self::Drop => "drop",
+            Self::Squash => "squash",
+            Self::Fixup => "fixup",
+            Self::Reword => "reword",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TodoEntry {
+    action: TodoAction,
+    sha: String,
+    /// Commit subject. Only for display in the editor / progress log;
+    /// the sha drives the actual replay.
+    subject: String,
+    /// For reword/squash: the user's new message, captured at editor
+    /// time so `--continue` can replay without re-prompting. For other
+    /// actions, `None`.
+    new_message: Option<String>,
+}
+
 /// Persisted state for an in-progress `llm-edit git-rebase`. Written to
 /// `.git/llm-edit-rebase/state.json` at rebase start, updated on each
 /// successful step, and consumed (+ removed) by --continue / --abort.
@@ -25,14 +74,23 @@ struct RebaseState {
     original_head_sha: String,
     /// SHA of the target base.
     onto_sha: String,
-    /// Commits yet to be replayed, chronological order. On conflict,
-    /// commits_remaining[0] is the commit whose replay failed; the
-    /// working tree has been populated with the partial merge so the
-    /// user can resolve, and `--continue` commits that resolved tree
-    /// using the failing commit's metadata.
-    commits_remaining: Vec<String>,
+    /// Entries yet to be processed, chronological order. On conflict,
+    /// todo[0] is the entry whose replay failed; the working tree has
+    /// been populated with the partial merge so the user can resolve,
+    /// and `--continue` commits that resolved tree using the failing
+    /// entry's action + sha + message.
+    todo: Vec<TodoEntry>,
     /// Current tip of the rebase (parent for the next commit-tree).
     rebase_head: String,
+    /// Files that were introduced / modified by `drop`ped commits and
+    /// haven't yet been re-touched by a kept commit. The hybrid merger
+    /// doesn't know anything about our drop semantics — for any file in
+    /// this map, after a pick's rebase_step we strip the path from the
+    /// resulting tree if its content still matches the dropped commit's
+    /// version. If a later commit explicitly changes the content, the
+    /// path leaves the map.
+    #[serde(default)]
+    drop_strip: std::collections::BTreeMap<String, String>,
 }
 
 /// Apply a single op (parsed from JSON) against `cwd`, write changed files
@@ -784,6 +842,12 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
 /// inspect / resolve, and returns 1. (No `--continue` / `--abort`
 /// support yet — tracked on #42 as future work.)
 pub fn run_git_rebase(onto: &str) -> Result<i32> {
+    run_git_rebase_ex(onto, false)
+}
+
+/// Internal entry point used by the binary. `interactive` controls whether
+/// we open `$EDITOR` on a todo file before replay.
+pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
     let state_path = rebase_state_path()?;
     if state_path.exists() {
         eprintln!(
@@ -828,6 +892,74 @@ pub fn run_git_rebase(onto: &str) -> Result<i32> {
         return Ok(0);
     }
 
+    // Build initial todo: one `pick` per commit, chronological.
+    let mut todo: Vec<TodoEntry> = Vec::with_capacity(commits.len());
+    for sha in &commits {
+        let subject = git_cmd(&["log", "-1", "--format=%s", sha])?
+            .trim_end_matches('\n')
+            .to_string();
+        todo.push(TodoEntry {
+            action: TodoAction::Pick,
+            sha: sha.clone(),
+            subject,
+            new_message: None,
+        });
+    }
+
+    if interactive {
+        todo = edit_todo(todo)?;
+        if todo.iter().all(|t| t.action == TodoAction::Drop) {
+            eprintln!("llm-edit git-rebase: todo is empty after edit — nothing to do.");
+            return Ok(0);
+        }
+        if matches!(todo.first().map(|t| t.action), Some(TodoAction::Squash) | Some(TodoAction::Fixup)) {
+            eprintln!(
+                "llm-edit git-rebase: the first todo entry cannot be 'squash' or 'fixup' — it needs a prior pick."
+            );
+            return Ok(1);
+        }
+        // Pre-capture reword / squash messages so the replay loop and
+        // --continue don't need to re-open an editor. Squash combines
+        // the prior pick's message with the squash's own message.
+        let mut pending_pick_msg: Option<String> = None;
+        for i in 0..todo.len() {
+            let action = todo[i].action;
+            let sha = todo[i].sha.clone();
+            let orig_msg = git_cmd(&["log", "-1", "--format=%B", &sha])?
+                .trim_end_matches('\n')
+                .to_string();
+            match action {
+                TodoAction::Pick => {
+                    pending_pick_msg = Some(orig_msg);
+                }
+                TodoAction::Reword => {
+                    let new_msg = run_editor_on_text(
+                        &format!("# Reword commit {}\n{}\n", &sha[..8.min(sha.len())], orig_msg),
+                        ".git-rebase-reword.txt",
+                    )?;
+                    let new_msg = strip_comments(&new_msg);
+                    todo[i].new_message = Some(new_msg.clone());
+                    pending_pick_msg = Some(new_msg);
+                }
+                TodoAction::Squash => {
+                    let prior = pending_pick_msg.clone().unwrap_or_default();
+                    let combined_seed = format!(
+                        "# This is a combination of 2 commits.\n# The first commit's message:\n{}\n\n# The squash commit's message:\n{}\n",
+                        prior, orig_msg
+                    );
+                    let edited = run_editor_on_text(&combined_seed, ".git-rebase-squash.txt")?;
+                    let edited = strip_comments(&edited);
+                    todo[i].new_message = Some(edited.clone());
+                    pending_pick_msg = Some(edited);
+                }
+                TodoAction::Fixup => {
+                    // Keep prior message; no editor, no new message.
+                }
+                TodoAction::Drop => {}
+            }
+        }
+    }
+
     // Detach HEAD onto the new base so we can build commits via
     // `commit-tree` + `update-ref HEAD` cleanly. We'll restore the
     // branch ref at the end (or on error, leave HEAD detached for
@@ -838,8 +970,9 @@ pub fn run_git_rebase(onto: &str) -> Result<i32> {
         original_branch: head_branch,
         original_head_sha: head_sha,
         onto_sha: onto_sha.clone(),
-        commits_remaining: commits,
+        todo,
         rebase_head: onto_sha,
+        drop_strip: std::collections::BTreeMap::new(),
     };
     write_rebase_state(&state)?;
 
@@ -856,37 +989,94 @@ pub fn run_git_rebase_continue() -> Result<i32> {
         return Ok(1);
     }
     let mut state = read_rebase_state()?;
-    if state.commits_remaining.is_empty() {
-        eprintln!("llm-edit git-rebase --continue: state has no remaining commits.");
+    if state.todo.is_empty() {
+        eprintln!("llm-edit git-rebase --continue: state has no remaining entries.");
         remove_rebase_state()?;
         return Ok(1);
     }
 
-    // The failing commit — we assume the user has resolved the tree on
-    // disk. Stage everything, commit-tree using the failing commit's
-    // message, advance rebase_head.
-    let failing = state.commits_remaining[0].clone();
-    let msg = git_cmd(&["log", "-1", "--format=%B", &failing])?
-        .trim_end_matches('\n')
-        .to_string();
+    // The failing entry — user has resolved the tree on disk. Stage
+    // everything, build the resolved tree, and land it according to
+    // the failing entry's action.
+    let failing = state.todo[0].clone();
     git_cmd(&["add", "-A"])?;
     let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
-    let new_commit = git_cmd(&[
-        "commit-tree",
-        &tree_sha,
-        "-p",
-        &state.rebase_head,
-        "-m",
-        &msg,
-    ])?
-    .trim()
-    .to_string();
-    git_cmd(&["update-ref", "HEAD", &new_commit])?;
-    state.rebase_head = new_commit;
-    state.commits_remaining.remove(0);
+    apply_todo_action(&mut state, &failing, &tree_sha)?;
+    state.todo.remove(0);
     write_rebase_state(&state)?;
 
     rebase_loop(&mut state)
+}
+
+/// Given a resolved tree (already written via `write-tree`) and the
+/// todo entry it represents, produce the new `rebase_head` according to
+/// the entry's action. For drop, this is a no-op (caller should have
+/// filtered drops out). For pick/reword, builds a child commit on top
+/// of rebase_head. For squash/fixup, rewrites rebase_head in place by
+/// creating a new commit with the SAME parent as the current
+/// rebase_head (effectively replacing it).
+fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str) -> Result<()> {
+    match entry.action {
+        TodoAction::Drop => Ok(()),
+        TodoAction::Pick => {
+            let msg = git_cmd(&["log", "-1", "--format=%B", &entry.sha])?
+                .trim_end_matches('\n')
+                .to_string();
+            let new_commit = git_cmd(&[
+                "commit-tree", tree_sha, "-p", &state.rebase_head, "-m", &msg,
+            ])?
+            .trim()
+            .to_string();
+            git_cmd(&["update-ref", "HEAD", &new_commit])?;
+            state.rebase_head = new_commit;
+            Ok(())
+        }
+        TodoAction::Reword => {
+            let msg = entry.new_message.clone().unwrap_or_else(|| String::new());
+            let new_commit = git_cmd(&[
+                "commit-tree", tree_sha, "-p", &state.rebase_head, "-m", &msg,
+            ])?
+            .trim()
+            .to_string();
+            git_cmd(&["update-ref", "HEAD", &new_commit])?;
+            state.rebase_head = new_commit;
+            Ok(())
+        }
+        TodoAction::Squash => {
+            // Replace rebase_head in-place: new commit has rebase_head's
+            // parent, combined message (captured at edit time), and the
+            // freshly resolved tree.
+            let parent = git_cmd(&["rev-parse", &format!("{}^", state.rebase_head)])?
+                .trim()
+                .to_string();
+            let msg = entry.new_message.clone().unwrap_or_else(|| String::new());
+            let new_commit = git_cmd(&[
+                "commit-tree", tree_sha, "-p", &parent, "-m", &msg,
+            ])?
+            .trim()
+            .to_string();
+            git_cmd(&["update-ref", "HEAD", &new_commit])?;
+            state.rebase_head = new_commit;
+            Ok(())
+        }
+        TodoAction::Fixup => {
+            // Same as squash but keep the prior pick's message verbatim.
+            let parent = git_cmd(&["rev-parse", &format!("{}^", state.rebase_head)])?
+                .trim()
+                .to_string();
+            let prior_msg = git_cmd(&["log", "-1", "--format=%B", &state.rebase_head])?
+                .trim_end_matches('\n')
+                .to_string();
+            let new_commit = git_cmd(&[
+                "commit-tree", tree_sha, "-p", &parent, "-m", &prior_msg,
+            ])?
+            .trim()
+            .to_string();
+            git_cmd(&["update-ref", "HEAD", &new_commit])?;
+            state.rebase_head = new_commit;
+            Ok(())
+        }
+    }
 }
 
 /// Abort an in-progress rebase. Restores the original branch to its
@@ -924,27 +1114,73 @@ pub fn run_git_rebase_abort() -> Result<i32> {
 /// updated state after each successful step, and on conflict. On clean
 /// completion, moves the branch ref + checks out + removes state.
 fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
-    while !state.commits_remaining.is_empty() {
-        let commit = state.commits_remaining[0].clone();
+    while !state.todo.is_empty() {
+        let entry = state.todo[0].clone();
+        let commit = entry.sha.clone();
+        let short = &commit[..8.min(commit.len())];
+
+        // `drop` needs no merger work — skip the commit entirely, but
+        // record the files the dropped commit added / modified so we
+        // can strip them from the next pick's merger output (the hybrid
+        // merger doesn't know about drop semantics and would otherwise
+        // let diff3 reintroduce them).
+        if entry.action == TodoAction::Drop {
+            eprintln!("  [{}] drop", short);
+            let dropped_tree = git_extract_tree(&commit)?;
+            let parent_sha = git_cmd(&["rev-parse", &format!("{}^", commit)])?
+                .trim()
+                .to_string();
+            let parent_tree = git_extract_tree(&parent_sha)?;
+            for (path, content) in &dropped_tree {
+                if parent_tree.get(path) != Some(content) {
+                    let rel = path.to_string_lossy().to_string();
+                    state.drop_strip.insert(rel, content.clone());
+                }
+            }
+            state.todo.remove(0);
+            write_rebase_state(state)?;
+            continue;
+        }
+
         let parent_sha = git_cmd(&["rev-parse", &format!("{}^", commit)])?
             .trim()
             .to_string();
-        let msg = git_cmd(&["log", "-1", "--format=%B", &commit])?
-            .trim_end_matches('\n')
-            .to_string();
-        let short = &commit[..8];
 
         match rebase_step(&parent_sha, &state.rebase_head, &commit)? {
-            RebaseStep::Clean { tree, log, fallback_files } => {
+            RebaseStep::Clean { mut tree, log, fallback_files } => {
+                // Drop-awareness: for each path in drop_strip, if the
+                // merger output still matches the dropped commit's
+                // content (or is empty, meaning diff3 deleted it), drop
+                // the path from the tree. If the content differs, the
+                // current commit modified the file — honor that and
+                // remove the path from the strip map.
+                if !state.drop_strip.is_empty() {
+                    let keys: Vec<String> = state.drop_strip.keys().cloned().collect();
+                    for rel in keys {
+                        let path = PathBuf::from(&rel);
+                        let expected = state.drop_strip.get(&rel).cloned().unwrap_or_default();
+                        match tree.get(&path) {
+                            Some(content) if content == &expected || content.is_empty() => {
+                                tree.remove(&path);
+                            }
+                            Some(_) => {
+                                state.drop_strip.remove(&rel);
+                            }
+                            None => {
+                                state.drop_strip.remove(&rel);
+                            }
+                        }
+                    }
+                }
                 if !fallback_files.is_empty() {
                     eprintln!(
                         "  [{}] {} ({} text-fallback file(s))",
                         short,
-                        short,
+                        entry.action.as_str(),
                         fallback_files.len()
                     );
                 } else {
-                    eprintln!("  [{}]", short);
+                    eprintln!("  [{}] {}", short, entry.action.as_str());
                 }
                 git_cmd(&["read-tree", "--reset", "-u", &state.rebase_head])?;
                 let repo_root = repo_root()?;
@@ -966,19 +1202,8 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
 
                 git_cmd(&["add", "-A"])?;
                 let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
-                let new_commit = git_cmd(&[
-                    "commit-tree",
-                    &tree_sha,
-                    "-p",
-                    &state.rebase_head,
-                    "-m",
-                    &msg,
-                ])?
-                .trim()
-                .to_string();
-                git_cmd(&["update-ref", "HEAD", &new_commit])?;
-                state.rebase_head = new_commit;
-                state.commits_remaining.remove(0);
+                apply_todo_action(state, &entry, &tree_sha)?;
+                state.todo.remove(0);
                 write_rebase_state(state)?;
             }
             RebaseStep::Conflict {
@@ -1067,12 +1292,135 @@ fn read_rebase_state() -> Result<RebaseState> {
     Ok(serde_json::from_str(&body)?)
 }
 
+/// Write the todo to `.git/llm-edit-rebase/todo.txt`, invoke the user's
+/// editor on it, re-read, and parse back into `TodoEntry` structs.
+/// Unknown / blank / comment lines are skipped. Lines whose action is
+/// unrecognized abort the rebase with an error.
+fn edit_todo(initial: Vec<TodoEntry>) -> Result<Vec<TodoEntry>> {
+    let state_dir = rebase_state_path()?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(".git/llm-edit-rebase"));
+    std::fs::create_dir_all(&state_dir)?;
+    let todo_path = state_dir.join("todo.txt");
+
+    let mut body = String::new();
+    for e in &initial {
+        body.push_str(&format!("{} {} {}\n", e.action.as_str(), short_sha(&e.sha), e.subject));
+    }
+    body.push_str("\n# Commands:\n");
+    body.push_str("#   p, pick   = use commit\n");
+    body.push_str("#   r, reword = use commit, but edit the commit message\n");
+    body.push_str("#   s, squash = use commit, but meld into previous commit\n");
+    body.push_str("#   f, fixup  = like squash, but discard this commit's log message\n");
+    body.push_str("#   d, drop   = remove commit\n");
+    body.push_str("#\n");
+    body.push_str("# Blank and commented lines are ignored.\n");
+    std::fs::write(&todo_path, &body)?;
+
+    run_editor(&todo_path)?;
+
+    let edited = std::fs::read_to_string(&todo_path)
+        .with_context(|| format!("read {}", todo_path.display()))?;
+
+    // Map short sha -> original entry for lookup.
+    let by_short: std::collections::HashMap<String, TodoEntry> = initial
+        .iter()
+        .map(|e| (short_sha(&e.sha), e.clone()))
+        .collect();
+
+    let mut out: Vec<TodoEntry> = Vec::new();
+    for (lineno, raw) in edited.lines().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(3, char::is_whitespace);
+        let action_tok = parts.next().unwrap_or("");
+        let sha_tok = parts.next().unwrap_or("");
+        let subject = parts.next().unwrap_or("").to_string();
+        let action = TodoAction::parse(action_tok).ok_or_else(|| {
+            anyhow!("todo.txt line {}: unknown action {:?}", lineno + 1, action_tok)
+        })?;
+        let original = by_short.get(sha_tok).ok_or_else(|| {
+            anyhow!("todo.txt line {}: unknown commit {:?}", lineno + 1, sha_tok)
+        })?;
+        out.push(TodoEntry {
+            action,
+            sha: original.sha.clone(),
+            subject: if subject.is_empty() { original.subject.clone() } else { subject },
+            new_message: None,
+        });
+    }
+    Ok(out)
+}
+
+fn short_sha(sha: &str) -> String {
+    sha[..7.min(sha.len())].to_string()
+}
+
+/// Invoke the rebase editor on a file path. Respects
+/// `LLM_EDIT_REBASE_EDITOR`, then `$EDITOR`, then falls back to `vi`.
+fn run_editor(path: &Path) -> Result<()> {
+    let editor = std::env::var("LLM_EDIT_REBASE_EDITOR")
+        .ok()
+        .or_else(|| std::env::var("EDITOR").ok())
+        .unwrap_or_else(|| "vi".to_string());
+    // Use `sh -c` so multi-word editor commands (e.g. "code -w") work.
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(format!("{} \"$0\"", editor))
+        .arg(path)
+        .status()
+        .with_context(|| format!("spawn editor: {}", editor))?;
+    if !status.success() {
+        return Err(anyhow!("editor {} exited with {}", editor, status));
+    }
+    Ok(())
+}
+
+/// Seed a temp file with `initial`, open the editor on it, return the
+/// edited content (with a trailing newline trimmed). Used for reword /
+/// squash message prompts.
+fn run_editor_on_text(initial: &str, filename: &str) -> Result<String> {
+    let dir = rebase_state_path()?
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::temp_dir());
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(filename);
+    std::fs::write(&path, initial)?;
+    run_editor(&path)?;
+    let content = std::fs::read_to_string(&path)?;
+    let _ = std::fs::remove_file(&path);
+    Ok(content)
+}
+
+/// Drop comment lines (lines starting with `#`) and trim a trailing
+/// newline. Preserves blank lines inside the body.
+fn strip_comments(s: &str) -> String {
+    let mut out = String::new();
+    for line in s.lines() {
+        if line.trim_start().starts_with('#') {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
 fn remove_rebase_state() -> Result<()> {
     let path = rebase_state_path()?;
     if path.exists() {
         std::fs::remove_file(&path).ok();
-        // Best-effort: remove the parent dir if empty.
+        // Best-effort: clean sibling artifacts (todo.txt, squash/reword
+        // scratch files) and remove the parent dir if it's now empty.
         if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_file(parent.join("todo.txt"));
             let _ = std::fs::remove_dir(parent);
         }
     }

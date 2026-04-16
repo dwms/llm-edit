@@ -6,8 +6,8 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use llm_edit::cli::{
-    apply_op_json, merge_worktrees, record_delete_comment, run_git_merge, run_git_rebase,
-    run_infer, run_merge_driver,
+    apply_op_json, merge_worktrees, record_delete_comment, run_git_merge, run_infer,
+    run_merge_driver,
 };
 use serde_json::json;
 use std::path::PathBuf;
@@ -115,6 +115,10 @@ enum Cmd {
         /// Abandon a paused rebase and restore the original branch.
         #[arg(long)]
         abort: bool,
+        /// Open `$EDITOR` on the rebase todo so commits can be reordered,
+        /// dropped, squashed, fixed up, or reworded before replay.
+        #[arg(short = 'i', long)]
+        interactive: bool,
     },
     /// (Experimental) Git merge-driver entry point. Intended for
     /// `.gitattributes merge=llm-edit`, but git sets `.git/MERGE_HEAD`
@@ -156,7 +160,7 @@ fn main() -> Result<()> {
             println!("inferred {} op(s); {} file(s) had no detectable pattern", inferred, skipped);
             return Ok(());
         }
-        Cmd::GitRebase { onto, r#continue, abort } => {
+        Cmd::GitRebase { onto, r#continue, abort, interactive } => {
             let code = if abort {
                 llm_edit::cli::run_git_rebase_abort()?
             } else if r#continue {
@@ -165,7 +169,7 @@ fn main() -> Result<()> {
                 let onto = onto.ok_or_else(|| {
                     anyhow::anyhow!("git-rebase: <onto> required when not using --continue / --abort")
                 })?;
-                run_git_rebase(&onto)?
+                llm_edit::cli::run_git_rebase_ex(&onto, interactive)?
             };
             std::process::exit(code);
         }

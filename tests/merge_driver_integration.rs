@@ -589,6 +589,287 @@ fn git_rebase_abort_restores_original() {
     assert_eq!(app, "def get():\n    return 20\n");
 }
 
+// ---- interactive rebase helpers --------------------------------------
+
+/// Write an executable shell script that will be handed to llm-edit via
+/// `LLM_EDIT_REBASE_EDITOR`. The script receives the file to edit as
+/// its first (and only) positional arg.
+fn write_editor_script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+    let path = dir.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{}\n", body)).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&path, perms).unwrap();
+    }
+    path
+}
+
+/// Set up a linear 3-commit feat branch (a, middle, c) on top of `main`
+/// with no overlapping changes so rebase onto main is conflict-free.
+fn setup_three_commit_branch(repo: &Path) {
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    fs::write(repo.join("a.txt"), "base\n").unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    run("git", &["checkout", "-b", "feat", "-q"], repo);
+
+    fs::write(repo.join("a.txt"), "base\nfirst\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "feat: first"], repo);
+
+    fs::write(repo.join("b.txt"), "middle\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "feat: middle"], repo);
+
+    fs::write(repo.join("c.txt"), "last\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "feat: last"], repo);
+}
+
+fn run_llm_edit_with_env(args: &[&str], cwd: &Path, env: &[(&str, &str)]) {
+    let bin = env!("CARGO_BIN_EXE_llm-edit");
+    let mut cmd = Command::new(bin);
+    cmd.args(args).current_dir(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("spawn");
+    assert!(
+        out.status.success(),
+        "{:?} in {} failed:\nstdout: {}\nstderr: {}",
+        args,
+        cwd.display(),
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+fn commit_subjects(repo: &Path, rev: &str) -> Vec<String> {
+    let out = Command::new("git")
+        .args(["log", "--format=%s", rev])
+        .current_dir(repo)
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout)
+        .unwrap()
+        .lines()
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// `git-rebase -i` with the middle commit marked `drop`: resulting
+/// branch has 2 commits, no trace of the middle one.
+#[test]
+fn git_rebase_interactive_drop() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    setup_three_commit_branch(repo);
+
+    // Add a commit to main so the rebase actually moves commits.
+    run("git", &["checkout", "main", "-q"], repo);
+    fs::write(repo.join("main.txt"), "main\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "main: extra"], repo);
+    run("git", &["checkout", "feat", "-q"], repo);
+
+    // Editor: rewrite `pick <sha> feat: middle` -> `drop <sha> feat: middle`.
+    let editor = write_editor_script(
+        repo,
+        "editor.sh",
+        r#"sed -i.bak -e 's/^pick \([a-f0-9]*\) feat: middle/drop \1 feat: middle/' "$1""#,
+    );
+
+    run_llm_edit_with_env(
+        &["git-rebase", "-i", "main"],
+        repo,
+        &[("LLM_EDIT_REBASE_EDITOR", editor.to_str().unwrap())],
+    );
+
+    let subjects = commit_subjects(repo, "feat");
+    assert_eq!(
+        subjects,
+        vec![
+            "feat: last".to_string(),
+            "feat: first".to_string(),
+            "main: extra".to_string(),
+            "base".to_string(),
+        ],
+        "dropped commit should not appear in history: {:?}",
+        subjects
+    );
+    // b.txt should no longer exist (it was introduced by the dropped commit).
+    assert!(!repo.join("b.txt").exists(), "dropped commit's file still present");
+    assert!(repo.join("c.txt").exists(), "later commit's file missing");
+}
+
+/// `git-rebase -i` with the last commit marked `squash`: combined
+/// message edited; resulting branch has 2 feat commits collapsed into 1.
+#[test]
+fn git_rebase_interactive_squash() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    setup_three_commit_branch(repo);
+
+    run("git", &["checkout", "main", "-q"], repo);
+    fs::write(repo.join("main.txt"), "main\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "main: extra"], repo);
+    run("git", &["checkout", "feat", "-q"], repo);
+
+    // First editor invocation: rewrite the todo to squash `feat: last`
+    // into `feat: middle`. Second editor invocation: commit message
+    // prompt for the squash — overwrite with a known combined message.
+    // Use a marker file to distinguish the two calls.
+    let editor = write_editor_script(
+        repo,
+        "editor.sh",
+        r#"
+marker="$(dirname "$1")/.editor-call-count"
+if [ ! -f "$marker" ]; then
+    echo 1 > "$marker"
+    sed -i.bak -e 's/^pick \([a-f0-9]*\) feat: last/squash \1 feat: last/' "$1"
+else
+    echo "combined middle and last" > "$1"
+fi
+"#,
+    );
+
+    run_llm_edit_with_env(
+        &["git-rebase", "-i", "main"],
+        repo,
+        &[("LLM_EDIT_REBASE_EDITOR", editor.to_str().unwrap())],
+    );
+
+    let subjects = commit_subjects(repo, "feat");
+    assert_eq!(
+        subjects,
+        vec![
+            "combined middle and last".to_string(),
+            "feat: first".to_string(),
+            "main: extra".to_string(),
+            "base".to_string(),
+        ],
+        "squash should collapse middle+last into one commit: {:?}",
+        subjects
+    );
+    // Both files from squashed commits should be present.
+    assert!(repo.join("b.txt").exists(), "middle's file missing after squash");
+    assert!(repo.join("c.txt").exists(), "last's file missing after squash");
+}
+
+/// `git-rebase -i` with `fixup`: same tree result as squash, but the
+/// prior commit's message is kept verbatim — no editor prompt for the
+/// combined message.
+#[test]
+fn git_rebase_interactive_fixup() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    setup_three_commit_branch(repo);
+
+    run("git", &["checkout", "main", "-q"], repo);
+    fs::write(repo.join("main.txt"), "main\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "main: extra"], repo);
+    run("git", &["checkout", "feat", "-q"], repo);
+
+    let editor = write_editor_script(
+        repo,
+        "editor.sh",
+        r#"sed -i.bak -e 's/^pick \([a-f0-9]*\) feat: last/fixup \1 feat: last/' "$1""#,
+    );
+
+    run_llm_edit_with_env(
+        &["git-rebase", "-i", "main"],
+        repo,
+        &[("LLM_EDIT_REBASE_EDITOR", editor.to_str().unwrap())],
+    );
+
+    let subjects = commit_subjects(repo, "feat");
+    assert_eq!(
+        subjects,
+        vec![
+            "feat: middle".to_string(),
+            "feat: first".to_string(),
+            "main: extra".to_string(),
+            "base".to_string(),
+        ],
+        "fixup should keep prior's message: {:?}",
+        subjects
+    );
+    assert!(repo.join("b.txt").exists());
+    assert!(repo.join("c.txt").exists());
+}
+
+/// `git-rebase -i` with `reword`: single commit, rename its message.
+#[test]
+fn git_rebase_interactive_reword() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    fs::write(repo.join("a.txt"), "base\n").unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    // Advance main so rebase does real work.
+    fs::write(repo.join("main.txt"), "main\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "main: extra"], repo);
+
+    run("git", &["checkout", "-b", "feat", "HEAD~1", "-q"], repo);
+    fs::write(repo.join("a.txt"), "base\nfeat\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "feat: original message"], repo);
+
+    // Two-call editor: first rewrites the todo (pick -> reword),
+    // second supplies the new commit message.
+    let editor = write_editor_script(
+        repo,
+        "editor.sh",
+        r#"
+marker="$(dirname "$1")/.editor-call-count"
+if [ ! -f "$marker" ]; then
+    echo 1 > "$marker"
+    sed -i.bak -e 's/^pick \([a-f0-9]*\) feat: original message/reword \1 feat: original message/' "$1"
+else
+    echo "feat: reworded message" > "$1"
+fi
+"#,
+    );
+
+    run_llm_edit_with_env(
+        &["git-rebase", "-i", "main"],
+        repo,
+        &[("LLM_EDIT_REBASE_EDITOR", editor.to_str().unwrap())],
+    );
+
+    let subjects = commit_subjects(repo, "feat");
+    assert_eq!(
+        subjects,
+        vec![
+            "feat: reworded message".to_string(),
+            "main: extra".to_string(),
+            "base".to_string(),
+        ],
+        "reword should replace the commit message: {:?}",
+        subjects
+    );
+}
+
 /// `infer` derives a `replace_in_anchor` op for a single substring
 /// change inside a function body.
 #[test]
