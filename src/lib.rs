@@ -1,3 +1,4 @@
+pub mod ast_merge;
 pub mod cli;
 pub mod merge_logic;
 pub mod ops;

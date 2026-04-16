@@ -742,17 +742,26 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         let base_c = base_tree.get(path).cloned().unwrap_or_default();
         let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
         let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
-        let merged = diff3_merge_strings(&ours_c, &base_c, &theirs_c)?;
-        // Real diff3 conflict markers are at the start of a line.
-        // Substring search would false-positive on prose that mentions
-        // the literal "<<<<<<<" string (e.g. CONTRIBUTING.md describing
-        // what conflict markers look like).
+
+        // Try AST-aware merge first: splits the file into named
+        // top-level items and merges per-item. Two branches editing
+        // different functions in the same file merge cleanly instead
+        // of colliding on interleaved lines. Falls back to diff3 when
+        // the language isn't supported or no named items are found.
+        let merged = match crate::ast_merge::ast_merge(path, &base_c, &ours_c, &theirs_c) {
+            crate::ast_merge::AstMergeResult::Clean(m) => m,
+            crate::ast_merge::AstMergeResult::Conflict(m) => {
+                text_conflicts.push(path.clone());
+                final_tree.insert(path.clone(), m);
+                continue;
+            }
+            crate::ast_merge::AstMergeResult::NotApplicable => {
+                // Fall through to diff3.
+                diff3_merge_strings(&ours_c, &base_c, &theirs_c)?
+            }
+        };
+
         let has_markers = merged.lines().any(|l| l.starts_with("<<<<<<<"));
-        // Even when diff3 produces no markers, the merged output can
-        // be syntactically broken — e.g. one side dropped a closing
-        // brace because the surrounding context coincidentally lined
-        // up. Validate against the file's tree-sitter grammar when we
-        // know one. (#47)
         let parse_ok = parses_cleanly(path, &merged);
         if has_markers || !parse_ok {
             text_conflicts.push(path.clone());
@@ -1594,7 +1603,18 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
         let base_c = base_tree.get(path).cloned().unwrap_or_default();
         let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
         let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
-        let merged = diff3_merge_strings(&ours_c, &base_c, &theirs_c)?;
+        let merged = match crate::ast_merge::ast_merge(path, &base_c, &ours_c, &theirs_c) {
+            crate::ast_merge::AstMergeResult::Clean(m) => m,
+            crate::ast_merge::AstMergeResult::Conflict(m) => {
+                conflict_files.push(path.clone());
+                conflict_reasons.push(format!("{} (AST per-item conflict)", path.display()));
+                final_tree.insert(path.clone(), m);
+                continue;
+            }
+            crate::ast_merge::AstMergeResult::NotApplicable => {
+                diff3_merge_strings(&ours_c, &base_c, &theirs_c)?
+            }
+        };
         let has_markers = merged.lines().any(|l| l.starts_with("<<<<<<<"));
         let parse_ok = parses_cleanly(path, &merged);
         if has_markers || !parse_ok {
