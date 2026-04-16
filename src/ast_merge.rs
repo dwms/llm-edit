@@ -423,10 +423,7 @@ fn merge_changed_item_recursive(
     let (sub_t, _) = extract_subitems(body_t, theirs.as_bytes(), ext);
 
     // No named children means no benefit from recursion.
-    let has_named = sub_o.iter().any(|i| i.kind != "__anon__")
-        || sub_b.iter().any(|i| i.kind != "__anon__")
-        || sub_t.iter().any(|i| i.kind != "__anon__");
-    if !has_named {
+    if sub_o.is_empty() && sub_b.is_empty() && sub_t.is_empty() {
         return None;
     }
 
@@ -490,9 +487,8 @@ fn extract_subitems(
     ext: &str,
 ) -> (Vec<Item>, String) {
     let mut items: Vec<Item> = Vec::new();
-    let mut anon_idx = 0usize;
     // Start position right after the body's opening `{`.
-    let mut prev_end = body.start_byte() + 1;
+    let mut prev_named_end = body.start_byte() + 1;
     let body_close = body.end_byte().saturating_sub(1); // position of `}`
     let mut cursor = body.walk();
     for child in body.children(&mut cursor) {
@@ -503,30 +499,30 @@ fn extract_subitems(
             "indent" | "dedent" | "newline" => continue,
             _ => {}
         }
-        let leading = std::str::from_utf8(&source[prev_end..child.start_byte()])
+        let name = match item_name(child, source, ext) {
+            Some(n) => n,
+            // Anonymous nodes (doc comments, attributes, etc.) are NOT
+            // promoted to items. Positional anon keys collide between
+            // sides when each side adds different leading trivia (e.g.
+            // doc comments) for its own new method, producing spurious
+            // conflicts. Instead, leave their bytes in the source and
+            // they will be absorbed into the *next* named item's
+            // `leading`, which keeps the trivia attached to the item it
+            // documents.
+            None => continue,
+        };
+        let leading = std::str::from_utf8(&source[prev_named_end..child.start_byte()])
             .unwrap_or("")
             .to_string();
         let text = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
             .unwrap_or("")
             .to_string();
-        prev_end = child.end_byte();
+        prev_named_end = child.end_byte();
         let kind = child.kind().to_string();
-        let name = item_name(child, source, ext);
-        match name {
-            Some(n) => items.push(Item { leading, kind, name: n, text }),
-            None => {
-                items.push(Item {
-                    leading,
-                    kind: "__anon__".to_string(),
-                    name: format!("__{anon_idx}__"),
-                    text,
-                });
-                anon_idx += 1;
-            }
-        }
+        items.push(Item { leading, kind, name, text });
     }
-    let trailing = if prev_end <= body_close {
-        std::str::from_utf8(&source[prev_end..body_close])
+    let trailing = if prev_named_end <= body_close {
+        std::str::from_utf8(&source[prev_named_end..body_close])
             .unwrap_or("")
             .to_string()
     } else {
