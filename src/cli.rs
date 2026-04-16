@@ -48,6 +48,13 @@ impl TodoAction {
             Self::Edit => "edit",
         }
     }
+
+    /// True for actions that need a commit message from the user
+    /// (reword) or merge an existing message (squash).
+    #[allow(dead_code)]
+    fn requires_message(&self) -> bool {
+        matches!(self, Self::Reword | Self::Squash)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
