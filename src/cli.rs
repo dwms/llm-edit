@@ -48,6 +48,14 @@ impl TodoAction {
             Self::Edit => "edit",
         }
     }
+
+    /// True for actions that change the commit graph in a way that
+    /// loses or rewrites work — drop discards a commit; squash/fixup
+    /// fold one into another.
+    #[allow(dead_code)]
+    fn is_destructive(&self) -> bool {
+        matches!(self, Self::Drop | Self::Squash | Self::Fixup)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
