@@ -44,6 +44,10 @@ path = "src/bin/verify_cli.rs"
 name = "bench"
 path = "src/bin/bench.rs"
 
+[[bin]]
+name = "token_savings"
+path = "src/bin/token_savings.rs"
+
 [lib]
 name = "llm_edit"
 path = "src/lib.rs"
