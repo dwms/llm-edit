@@ -717,7 +717,8 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
 
     let mut final_tree: Tree = Tree::new();
     let mut text_conflicts: Vec<PathBuf> = Vec::new();
-    let mut fallback_files: Vec<PathBuf> = Vec::new();
+    let mut ast_merged_files: Vec<PathBuf> = Vec::new();
+    let mut text_fallback_files: Vec<PathBuf> = Vec::new();
 
     for path in &all_files {
         let a_covered = expected_a.get(path) == ours_tree.get(path);
@@ -733,12 +734,11 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
             continue;
         }
 
-        // At least one side has unrecorded edits to this file. Fall
-        // back to diff3 of the actual contents. The semantic merger's
-        // op-log still gets persisted; cross-file propagation that
-        // was driven by ops still applied to OTHER files; this file
-        // just gets the dumb-but-honest text merge.
-        fallback_files.push(path.clone());
+        // At least one side has unrecorded edits to this file. Try
+        // AST-aware merge first; fall back to diff3 if the language
+        // isn't supported. The semantic merger's op-log still gets
+        // persisted; cross-file propagation that was driven by ops
+        // still applied to OTHER files.
         let base_c = base_tree.get(path).cloned().unwrap_or_default();
         let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
         let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
@@ -749,14 +749,18 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         // of colliding on interleaved lines. Falls back to diff3 when
         // the language isn't supported or no named items are found.
         let merged = match crate::ast_merge::ast_merge(path, &base_c, &ours_c, &theirs_c) {
-            crate::ast_merge::AstMergeResult::Clean(m) => m,
+            crate::ast_merge::AstMergeResult::Clean(m) => {
+                ast_merged_files.push(path.clone());
+                m
+            }
             crate::ast_merge::AstMergeResult::Conflict(m) => {
+                ast_merged_files.push(path.clone());
                 text_conflicts.push(path.clone());
                 final_tree.insert(path.clone(), m);
                 continue;
             }
             crate::ast_merge::AstMergeResult::NotApplicable => {
-                // Fall through to diff3.
+                text_fallback_files.push(path.clone());
                 diff3_merge_strings(&ours_c, &base_c, &theirs_c)?
             }
         };
@@ -795,11 +799,23 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
 
     git_cmd(&["add", "-A"])?;
 
-    if !fallback_files.is_empty() {
+    if !ast_merged_files.is_empty() {
+        eprintln!(
+            "llm-edit git-merge: {} file(s) AST-merged ({})",
+            ast_merged_files.len(),
+            ast_merged_files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if !text_fallback_files.is_empty() {
         eprintln!(
             "llm-edit git-merge: {} file(s) fell back to text merge ({})",
-            fallback_files.len(),
-            fallback_files
+            text_fallback_files.len(),
+            text_fallback_files
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
@@ -1206,7 +1222,7 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
             .to_string();
 
         match rebase_step(&parent_sha, &state.rebase_head, &commit)? {
-            RebaseStep::Clean { mut tree, log, fallback_files } => {
+            RebaseStep::Clean { mut tree, log, ast_merged_files, text_fallback_files } => {
                 // Drop-awareness: for each path in drop_strip, if the
                 // merger output still matches the dropped commit's
                 // content (or is empty, meaning diff3 deleted it), drop
@@ -1231,16 +1247,21 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
                         }
                     }
                 }
-                if !fallback_files.is_empty() {
-                    eprintln!(
-                        "  [{}] {} ({} text-fallback file(s))",
-                        short,
-                        entry.action.as_str(),
-                        fallback_files.len()
-                    );
-                } else {
-                    eprintln!("  [{}] {}", short, entry.action.as_str());
+                let mut suffix = String::new();
+                if !ast_merged_files.is_empty() {
+                    suffix.push_str(&format!(" ({} AST-merged", ast_merged_files.len()));
                 }
+                if !text_fallback_files.is_empty() {
+                    if suffix.is_empty() {
+                        suffix.push_str(&format!(" ({} text-fallback", text_fallback_files.len()));
+                    } else {
+                        suffix.push_str(&format!(", {} text-fallback", text_fallback_files.len()));
+                    }
+                }
+                if !suffix.is_empty() {
+                    suffix.push(')');
+                }
+                eprintln!("  [{}] {}{}", short, entry.action.as_str(), suffix);
                 git_cmd(&["read-tree", "--reset", "-u", &state.rebase_head])?;
                 let repo_root = repo_root()?;
                 for (rel, content) in &tree {
@@ -1508,7 +1529,8 @@ enum RebaseStep {
     Clean {
         tree: Tree,
         log: Vec<Op>,
-        fallback_files: Vec<PathBuf>,
+        ast_merged_files: Vec<PathBuf>,
+        text_fallback_files: Vec<PathBuf>,
     },
     Conflict {
         reason: String,
@@ -1584,7 +1606,8 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
         .collect();
 
     let mut final_tree: Tree = Tree::new();
-    let mut fallback_files: Vec<PathBuf> = Vec::new();
+    let mut ast_merged_files: Vec<PathBuf> = Vec::new();
+    let mut text_fallback_files: Vec<PathBuf> = Vec::new();
     let mut conflict_files: Vec<PathBuf> = Vec::new();
     let mut conflict_reasons: Vec<String> = Vec::new();
 
@@ -1599,19 +1622,23 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
             continue;
         }
 
-        fallback_files.push(path.clone());
         let base_c = base_tree.get(path).cloned().unwrap_or_default();
         let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
         let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
         let merged = match crate::ast_merge::ast_merge(path, &base_c, &ours_c, &theirs_c) {
-            crate::ast_merge::AstMergeResult::Clean(m) => m,
+            crate::ast_merge::AstMergeResult::Clean(m) => {
+                ast_merged_files.push(path.clone());
+                m
+            }
             crate::ast_merge::AstMergeResult::Conflict(m) => {
+                ast_merged_files.push(path.clone());
                 conflict_files.push(path.clone());
                 conflict_reasons.push(format!("{} (AST per-item conflict)", path.display()));
                 final_tree.insert(path.clone(), m);
                 continue;
             }
             crate::ast_merge::AstMergeResult::NotApplicable => {
+                text_fallback_files.push(path.clone());
                 diff3_merge_strings(&ours_c, &base_c, &theirs_c)?
             }
         };
@@ -1642,7 +1669,8 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
     Ok(RebaseStep::Clean {
         tree: final_tree,
         log: merged_log_ops,
-        fallback_files,
+        ast_merged_files,
+        text_fallback_files,
     })
 }
 
