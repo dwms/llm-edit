@@ -1005,3 +1005,56 @@ fn git_rebase_interactive_edit() {
     // c.txt from the last commit should still be present.
     assert!(repo.join("c.txt").exists(), "last commit's file missing after edit+continue");
 }
+
+/// Dogfood guarantee: AST merge cleanly resolves two non-overlapping
+/// edits to different functions in the same Rust file. Without
+/// AST-aware merging, plain diff3 on a large Rust file like our own
+/// src/cli.rs has historically dropped braces or whole declarations
+/// when both branches edited (different) functions in the same file.
+///
+/// This test locks in the fix from #46 (tree-sitter-rust 0.24): if the
+/// parser can't read the file, this collapses back to text diff3 and
+/// the assertion below detects the regression.
+#[test]
+fn git_merge_ast_resolves_disjoint_rust_function_edits() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    let base = "fn alpha() -> i32 {\n    1\n}\n\nfn beta() -> i32 {\n    2\n}\n\nfn gamma() -> i32 {\n    3\n}\n";
+    fs::write(repo.join("lib.rs"), base).unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    // theirs edits gamma's body.
+    run("git", &["checkout", "-b", "theirs", "-q"], repo);
+    let theirs = "fn alpha() -> i32 {\n    1\n}\n\nfn beta() -> i32 {\n    2\n}\n\nfn gamma() -> i32 {\n    33\n}\n";
+    fs::write(repo.join("lib.rs"), theirs).unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "theirs: edit gamma"], repo);
+
+    // main edits alpha's body.
+    run("git", &["checkout", "main", "-q"], repo);
+    let ours = "fn alpha() -> i32 {\n    11\n}\n\nfn beta() -> i32 {\n    2\n}\n\nfn gamma() -> i32 {\n    3\n}\n";
+    fs::write(repo.join("lib.rs"), ours).unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "ours: edit alpha"], repo);
+
+    run_llm_edit(&["git-merge", "theirs"], repo);
+
+    let merged = fs::read_to_string(repo.join("lib.rs")).unwrap();
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "AST merge should produce no conflict markers on disjoint Rust function edits:\n{}",
+        merged
+    );
+    assert!(merged.contains("11"), "alpha edit lost:\n{}", merged);
+    assert!(merged.contains("33"), "gamma edit lost:\n{}", merged);
+    // Sanity: beta untouched.
+    assert!(merged.contains("fn beta() -> i32 {\n    2\n}"), "beta corrupted:\n{}", merged);
+}
