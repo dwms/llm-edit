@@ -1,0 +1,1 @@
+{"op":"rename_symbol","scope":"module","file":"src/cli.rs","old":"as_str","new":"as_word","kinds":["parameter","identifier"],"respect_shadowing":false}
