@@ -173,6 +173,85 @@ fn read_agent_log(dir: &Path) -> Result<Vec<Op>> {
     parse_log(&text)
 }
 
+/// Sentinel marking the start of an embedded llm-edit op block in a
+/// commit message body. The block is fenced like a markdown code block;
+/// the closing fence is a line that's exactly three backticks.
+///
+/// Format inside the block: JSONL — one op per line, no trailing
+/// commas, blank lines and `# …` comment lines are allowed.
+const OPS_BLOCK_OPEN: &str = "```llm-edit-ops";
+const OPS_BLOCK_CLOSE: &str = "```";
+
+/// Extract the JSONL ops from a commit message body. Returns an empty
+/// vec if the body has no ops block; returns an error only on malformed
+/// JSON inside an opened block.
+pub fn ops_from_commit_body(body: &str) -> Result<Vec<Op>> {
+    let mut inside = false;
+    let mut buf = String::new();
+    for line in body.lines() {
+        if !inside {
+            if line.trim_end() == OPS_BLOCK_OPEN {
+                inside = true;
+            }
+            continue;
+        }
+        if line.trim_end() == OPS_BLOCK_CLOSE {
+            break;
+        }
+        buf.push_str(line);
+        buf.push('\n');
+    }
+    if !inside {
+        return Ok(Vec::new());
+    }
+    parse_log(&buf)
+}
+
+/// Walk all commits reachable from `tip` but not from `base` (i.e.
+/// `git log base..tip`), parse the ops block out of each one, and
+/// return them in oldest-first order — the same order they were
+/// authored, which is the order they should be replayed in.
+pub fn ops_in_range(base: &str, tip: &str) -> Result<Vec<Op>> {
+    let range = format!("{}..{}", base, tip);
+    // %H sha + NUL + %B body + NUL record-separator. Body can contain
+    // newlines so we use NUL as the field/record separator and
+    // `--no-merges` to skip merge commits (their ops are already
+    // accounted for by the parents we'll walk).
+    let raw = git_cmd(&[
+        "log",
+        "--reverse",
+        "--no-merges",
+        "--format=%H%x00%B%x00",
+        &range,
+    ])?;
+    let mut all = Vec::new();
+    let mut iter = raw.split('\0');
+    while let (Some(_sha), Some(body)) = (iter.next(), iter.next()) {
+        let ops = ops_from_commit_body(body)?;
+        all.extend(ops);
+    }
+    Ok(all)
+}
+
+/// Render a slice of ops into a commit-body block (including the
+/// surrounding fence). Empty input returns an empty string so
+/// `prepare-commit-msg` can append unconditionally.
+pub fn render_ops_block(ops: &[Op]) -> Result<String> {
+    if ops.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::new();
+    out.push_str(OPS_BLOCK_OPEN);
+    out.push('\n');
+    for op in ops {
+        out.push_str(&serde_json::to_string(op)?);
+        out.push('\n');
+    }
+    out.push_str(OPS_BLOCK_CLOSE);
+    out.push('\n');
+    Ok(out)
+}
+
 fn write_output(output: &Path, tree: &Tree, log: &[Op]) -> Result<()> {
     std::fs::create_dir_all(output)?;
     for (rel, text) in tree {
@@ -670,14 +749,22 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
     let ours_tree_raw = git_extract_tree(&ours_sha)?;
     let theirs_tree_raw = git_extract_tree(&theirs_sha)?;
 
+    // Event-sourced ops: each commit's body carries the ops authored
+    // by that commit in a fenced ```llm-edit-ops block. The cumulative
+    // op stream for "ours" is the concatenation of those blocks across
+    // base..ours_sha; same for theirs. The committed log.jsonl in the
+    // tree is no longer the canonical source — it's transient pending
+    // ops that haven't been folded into a commit body yet.
+    let ours_ops = ops_in_range(&base_sha, &ours_sha)?;
+    let theirs_ops = ops_in_range(&base_sha, &theirs_sha)?;
+    // Plus any pending ops in the working tree's .llm-edit/log.jsonl
+    // (uncommitted edits the user staged). For the dogfood path we only
+    // honor pending ops on the "ours" side since "theirs" is a
+    // committed branch.
     let log_path = PathBuf::from(".llm-edit/log.jsonl");
-    let base_log = base_tree_raw.get(&log_path).cloned().unwrap_or_default();
-    let ours_log = ours_tree_raw.get(&log_path).cloned().unwrap_or_default();
-    let theirs_log = theirs_tree_raw.get(&log_path).cloned().unwrap_or_default();
-
-    let base_ops_count = parse_log(&base_log)?.len();
-    let ours_ops: Vec<Op> = parse_log(&ours_log)?.into_iter().skip(base_ops_count).collect();
-    let theirs_ops: Vec<Op> = parse_log(&theirs_log)?.into_iter().skip(base_ops_count).collect();
+    let pending_log = ours_tree_raw.get(&log_path).cloned().unwrap_or_default();
+    let pending_ops = parse_log(&pending_log)?;
+    let ours_ops: Vec<Op> = ours_ops.into_iter().chain(pending_ops).collect();
 
     let strip_meta = |tree: &Tree| -> Tree {
         tree.iter()
@@ -798,19 +885,20 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
             .with_context(|| format!("write {}", abs.display()))?;
     }
 
-    // Write merged log (always — even when all files fell back, the
-    // log carries forward correctly).
+    // Event-sourced model: the merge commit's two parents already
+    // anchor both sides' op history (`ops_in_range` walks them via git
+    // log). No need to write a denormalized cumulative log.jsonl into
+    // the merged tree. The merger's `merged_log_ops` are still useful
+    // for cross-file rewrites it applied to the tree, but the ops
+    // themselves are already in the parent commits' bodies.
+    let _ = &merged_log_ops; // future: surface in merge commit message
+
+    // Clear any stale pending ops staging file (it should already be
+    // empty if the workflow uses the prepare-commit-msg hook).
     let abs_log = repo_root.join(".llm-edit/log.jsonl");
-    std::fs::create_dir_all(abs_log.parent().unwrap())?;
-    let mut full_log = base_log;
-    if !full_log.is_empty() && !full_log.ends_with('\n') {
-        full_log.push('\n');
+    if abs_log.exists() {
+        std::fs::write(&abs_log, "")?;
     }
-    for op in &merged_log_ops {
-        full_log.push_str(&serde_json::to_string(op)?);
-        full_log.push('\n');
-    }
-    std::fs::write(&abs_log, full_log)?;
 
     git_cmd(&["add", "-A"])?;
 
@@ -1286,14 +1374,13 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
                     }
                     std::fs::write(&abs, content)?;
                 }
+                // Event-sourced model: ops live in commit bodies, not
+                // in a denormalized log.jsonl. Clear any stale staging.
+                let _ = &log;
                 let abs_log = repo_root.join(".llm-edit/log.jsonl");
-                std::fs::create_dir_all(abs_log.parent().unwrap())?;
-                let mut full_log = String::new();
-                for op in &log {
-                    full_log.push_str(&serde_json::to_string(op)?);
-                    full_log.push('\n');
+                if abs_log.exists() {
+                    std::fs::write(&abs_log, "")?;
                 }
-                std::fs::write(&abs_log, full_log)?;
 
                 git_cmd(&["add", "-A"])?;
                 let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
@@ -1569,14 +1656,10 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
     let ours_tree_raw = git_extract_tree(ours_sha)?;
     let theirs_tree_raw = git_extract_tree(theirs_sha)?;
 
-    let log_path = PathBuf::from(".llm-edit/log.jsonl");
-    let base_log = base_tree_raw.get(&log_path).cloned().unwrap_or_default();
-    let ours_log = ours_tree_raw.get(&log_path).cloned().unwrap_or_default();
-    let theirs_log = theirs_tree_raw.get(&log_path).cloned().unwrap_or_default();
-
-    let base_ops_count = parse_log(&base_log)?.len();
-    let ours_ops: Vec<Op> = parse_log(&ours_log)?.into_iter().skip(base_ops_count).collect();
-    let theirs_ops: Vec<Op> = parse_log(&theirs_log)?.into_iter().skip(base_ops_count).collect();
+    // Event-sourced: ops come from commit bodies in base..ours and
+    // base..theirs.
+    let ours_ops = ops_in_range(base_sha, ours_sha)?;
+    let theirs_ops = ops_in_range(base_sha, theirs_sha)?;
 
     let strip_meta = |t: &Tree| -> Tree {
         t.iter()
@@ -1726,7 +1809,7 @@ fn diff3_merge_strings(ours: &str, base: &str, theirs: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn parses_cleanly(path: &Path, text: &str) -> bool {
+pub fn parses_cleanly(path: &Path, text: &str) -> bool {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let lang: tree_sitter::Language = match ext {
         "py" => tree_sitter_python::LANGUAGE.into(),
@@ -1779,17 +1862,12 @@ pub fn run_merge_driver(
         .to_string();
 
     let base_tree = git_extract_tree(&base_sha)?;
-    let ours_tree = git_extract_tree(&ours_sha)?;
-    let theirs_tree = git_extract_tree(&theirs_sha)?;
+    let _ours_tree = git_extract_tree(&ours_sha)?;
+    let _theirs_tree = git_extract_tree(&theirs_sha)?;
 
-    let log_path = PathBuf::from(".llm-edit/log.jsonl");
-    let base_log = base_tree.get(&log_path).cloned().unwrap_or_default();
-    let ours_log = ours_tree.get(&log_path).cloned().unwrap_or_default();
-    let theirs_log = theirs_tree.get(&log_path).cloned().unwrap_or_default();
-
-    let base_ops_count = parse_log(&base_log)?.len();
-    let ours_ops: Vec<Op> = parse_log(&ours_log)?.into_iter().skip(base_ops_count).collect();
-    let theirs_ops: Vec<Op> = parse_log(&theirs_log)?.into_iter().skip(base_ops_count).collect();
+    // Event-sourced ops: walk commit bodies in base..ours and base..theirs.
+    let ours_ops = ops_in_range(&base_sha, &ours_sha)?;
+    let theirs_ops = ops_in_range(&base_sha, &theirs_sha)?;
 
     // Strip the log from the tree passed to the merger — the merger
     // treats `.llm-edit/` as metadata, not merge input.
@@ -1810,21 +1888,10 @@ pub fn run_merge_driver(
             std::fs::write(ours_path, merged)
                 .with_context(|| format!("write {}", ours_path.display()))?;
 
-            // Persist merged log to the working tree so the next merge
-            // can reuse it. Merged log = base log + new ops produced by
-            // this merge.
-            let repo_root = repo_root()?;
-            let abs_log = repo_root.join(".llm-edit/log.jsonl");
-            std::fs::create_dir_all(abs_log.parent().unwrap())?;
-            let mut full_log = base_log;
-            if !full_log.is_empty() && !full_log.ends_with('\n') {
-                full_log.push('\n');
-            }
-            for op in &log {
-                full_log.push_str(&serde_json::to_string(op)?);
-                full_log.push('\n');
-            }
-            std::fs::write(&abs_log, full_log)?;
+            // Event-sourced model: the merge commit's two parents
+            // already anchor both sides' op history. No log.jsonl
+            // writeback needed.
+            let _ = &log;
             Ok(0)
         }
         MergeResult::Conflicts(reports) => {

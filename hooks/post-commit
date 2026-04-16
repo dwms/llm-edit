@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Clear the pending-ops staging file after a successful commit. Ops
+# that were in the staging file should now live in the commit body
+# (placed there by prepare-commit-msg). Keeping them in the staging
+# file too would cause them to be replayed on the NEXT commit and end
+# up duplicated in the next commit's body.
+#
+# Skip when amending (the previous post-commit already cleared it).
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+LOG_FILE="$REPO_ROOT/.llm-edit/log.jsonl"
+
+[[ -f "$LOG_FILE" ]] || exit 0
+
+# Only clear if the just-made commit actually carries an ops block —
+# otherwise we'd erase pending ops that were never persisted (e.g.
+# someone hand-committed without going through prepare-commit-msg).
+LAST_BODY="$(git log -1 --format=%B)"
+if grep -qF '```llm-edit-ops' <<<"$LAST_BODY"; then
+  : > "$LOG_FILE"
+fi
