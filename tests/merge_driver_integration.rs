@@ -910,3 +910,98 @@ fn infer_detects_replace_in_anchor() {
     assert!(log.contains("\"new\":\"3\""), "wrong new:\n{}", log);
     assert!(log.contains("\"name\":\"total\""), "wrong fn:\n{}", log);
 }
+
+/// Run llm-edit with env vars and return the exit code instead of
+/// asserting success.
+fn run_llm_edit_with_env_code(args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> i32 {
+    let bin = env!("CARGO_BIN_EXE_llm-edit");
+    let mut cmd = Command::new(bin);
+    cmd.args(args).current_dir(cwd);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("spawn");
+    out.status.code().unwrap_or(-1)
+}
+
+/// `git-rebase -i` with the middle commit marked `edit`: the rebase
+/// pauses (exit 1), the user modifies a file, then `--continue` amends
+/// the paused commit and replays the remaining commits.
+#[test]
+fn git_rebase_interactive_edit() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+    setup_three_commit_branch(repo);
+
+    // Add a commit to main so the rebase actually moves commits.
+    run("git", &["checkout", "main", "-q"], repo);
+    fs::write(repo.join("main.txt"), "main\n").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "main: extra"], repo);
+    run("git", &["checkout", "feat", "-q"], repo);
+
+    // Editor: rewrite `pick <sha> feat: middle` -> `edit <sha> feat: middle`.
+    let editor = write_editor_script(
+        repo,
+        "editor.sh",
+        r#"sed -i.bak -e 's/^pick \([a-f0-9]*\) feat: middle/edit \1 feat: middle/' "$1""#,
+    );
+    let env = [("LLM_EDIT_REBASE_EDITOR", editor.to_str().unwrap())];
+
+    // First invocation: should pause (exit 1) at the middle commit.
+    let code = run_llm_edit_with_env_code(&["git-rebase", "-i", "main"], repo, &env);
+    assert_eq!(code, 1, "rebase should pause with exit code 1 for edit");
+
+    // State file should have paused_for_edit=true.
+    let state_json = fs::read_to_string(
+        repo.join(".git/llm-edit-rebase/state.json"),
+    )
+    .expect("state.json should exist");
+    assert!(
+        state_json.contains("\"paused_for_edit\": true")
+            || state_json.contains("\"paused_for_edit\":true"),
+        "state.json should have paused_for_edit=true:\n{}",
+        state_json
+    );
+
+    // The working tree should have b.txt (from the middle commit).
+    assert!(
+        repo.join("b.txt").exists(),
+        "b.txt should be in working tree after edit pause"
+    );
+
+    // Modify b.txt — this is the user's edit.
+    fs::write(repo.join("b.txt"), "middle-amended\n").unwrap();
+
+    // Continue the rebase.
+    run_llm_edit_with_env(
+        &["git-rebase", "--continue"],
+        repo,
+        &[],
+    );
+
+    // The branch should now be fully rebased.
+    let subjects = commit_subjects(repo, "feat");
+    assert_eq!(
+        subjects,
+        vec![
+            "feat: last".to_string(),
+            "feat: middle".to_string(),
+            "feat: first".to_string(),
+            "main: extra".to_string(),
+            "base".to_string(),
+        ],
+        "all commits should be present after edit+continue: {:?}",
+        subjects
+    );
+
+    // The amended content should be in the middle commit's tree.
+    let b_content = fs::read_to_string(repo.join("b.txt")).unwrap();
+    assert_eq!(
+        b_content, "middle-amended\n",
+        "b.txt should reflect the amendment"
+    );
+
+    // c.txt from the last commit should still be present.
+    assert!(repo.join("c.txt").exists(), "last commit's file missing after edit+continue");
+}

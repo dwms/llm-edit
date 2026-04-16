@@ -22,6 +22,7 @@ enum TodoAction {
     Squash,
     Fixup,
     Reword,
+    Edit,
 }
 
 impl TodoAction {
@@ -32,6 +33,7 @@ impl TodoAction {
             "squash" | "s" => Some(Self::Squash),
             "fixup" | "f" => Some(Self::Fixup),
             "reword" | "r" => Some(Self::Reword),
+            "edit" | "e" => Some(Self::Edit),
             _ => None,
         }
     }
@@ -43,6 +45,7 @@ impl TodoAction {
             Self::Squash => "squash",
             Self::Fixup => "fixup",
             Self::Reword => "reword",
+            Self::Edit => "edit",
         }
     }
 }
@@ -91,6 +94,12 @@ struct RebaseState {
     /// path leaves the map.
     #[serde(default)]
     drop_strip: std::collections::BTreeMap<String, String>,
+    /// When true, the rebase paused for an `edit` action. The commit has
+    /// already been created and `todo[0]` has been popped, so `--continue`
+    /// should amend `rebase_head` with whatever the user changed on disk,
+    /// then resume the loop.
+    #[serde(default)]
+    paused_for_edit: bool,
 }
 
 /// Apply a single op (parsed from JSON) against `cwd`, write changed files
@@ -929,7 +938,7 @@ pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
                 .trim_end_matches('\n')
                 .to_string();
             match action {
-                TodoAction::Pick => {
+                TodoAction::Pick | TodoAction::Edit => {
                     pending_pick_msg = Some(orig_msg);
                 }
                 TodoAction::Reword => {
@@ -973,6 +982,7 @@ pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
         todo,
         rebase_head: onto_sha,
         drop_strip: std::collections::BTreeMap::new(),
+        paused_for_edit: false,
     };
     write_rebase_state(&state)?;
 
@@ -989,6 +999,32 @@ pub fn run_git_rebase_continue() -> Result<i32> {
         return Ok(1);
     }
     let mut state = read_rebase_state()?;
+
+    if state.paused_for_edit {
+        // The user may have edited files after the `edit` pause. Amend
+        // `rebase_head` (which is the commit created by the edit step)
+        // by re-creating it with the same parent + message but a new tree
+        // built from whatever's on disk now.
+        git_cmd(&["add", "-A"])?;
+        let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
+        let parent = git_cmd(&["rev-parse", &format!("{}^", state.rebase_head)])?
+            .trim()
+            .to_string();
+        let msg = git_cmd(&["log", "-1", "--format=%B", &state.rebase_head])?
+            .trim_end_matches('\n')
+            .to_string();
+        let new_commit = git_cmd(&[
+            "commit-tree", &tree_sha, "-p", &parent, "-m", &msg,
+        ])?
+        .trim()
+        .to_string();
+        git_cmd(&["update-ref", "HEAD", &new_commit])?;
+        state.rebase_head = new_commit;
+        state.paused_for_edit = false;
+        write_rebase_state(&state)?;
+        return rebase_loop(&mut state);
+    }
+
     if state.todo.is_empty() {
         eprintln!("llm-edit git-rebase --continue: state has no remaining entries.");
         remove_rebase_state()?;
@@ -1069,6 +1105,20 @@ fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str)
                 .to_string();
             let new_commit = git_cmd(&[
                 "commit-tree", tree_sha, "-p", &parent, "-m", &prior_msg,
+            ])?
+            .trim()
+            .to_string();
+            git_cmd(&["update-ref", "HEAD", &new_commit])?;
+            state.rebase_head = new_commit;
+            Ok(())
+        }
+        TodoAction::Edit => {
+            // Same as Pick: create a new commit on rebase_head.
+            let msg = git_cmd(&["log", "-1", "--format=%B", &entry.sha])?
+                .trim_end_matches('\n')
+                .to_string();
+            let new_commit = git_cmd(&[
+                "commit-tree", tree_sha, "-p", &state.rebase_head, "-m", &msg,
             ])?
             .trim()
             .to_string();
@@ -1204,6 +1254,23 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
                 let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
                 apply_todo_action(state, &entry, &tree_sha)?;
                 state.todo.remove(0);
+
+                // For `edit`, pause: leave the working tree populated so
+                // the user can modify files, then `--continue` amends.
+                if entry.action == TodoAction::Edit {
+                    state.paused_for_edit = true;
+                    write_rebase_state(state)?;
+                    // Populate working tree from the just-created commit
+                    // so the user can see and edit the source.
+                    git_cmd(&["read-tree", "--reset", "-u", &state.rebase_head])?;
+                    let subject = &entry.subject;
+                    eprintln!(
+                        "Stopped at {} {}. Make your changes, then run `llm-edit git-rebase --continue`.",
+                        short, subject
+                    );
+                    return Ok(1);
+                }
+
                 write_rebase_state(state)?;
             }
             RebaseStep::Conflict {
@@ -1313,6 +1380,7 @@ fn edit_todo(initial: Vec<TodoEntry>) -> Result<Vec<TodoEntry>> {
     body.push_str("#   r, reword = use commit, but edit the commit message\n");
     body.push_str("#   s, squash = use commit, but meld into previous commit\n");
     body.push_str("#   f, fixup  = like squash, but discard this commit's log message\n");
+    body.push_str("#   e, edit   = use commit, but stop for amending\n");
     body.push_str("#   d, drop   = remove commit\n");
     body.push_str("#\n");
     body.push_str("# Blank and commented lines are ignored.\n");
