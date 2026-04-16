@@ -98,39 +98,56 @@ pub fn ast_merge(path: &Path, base: &str, ours: &str, theirs: &str) -> AstMergeR
     merge_items(&base_items, &ours_items, &theirs_items, ext)
 }
 
-/// Extract named top-level items from the root node. Items are
-/// identified by (kind, name); unnamed nodes (bare expressions,
-/// comments between items, module docstrings) are captured as
-/// `("__anon__", "__NNN__")` with a sequential index so they
-/// participate in ordering but don't match across versions by name.
+/// Extract named top-level items from the root node. Anonymous nodes
+/// (line_comment doc blocks, attribute_item attributes, etc.) are
+/// NOT promoted to items — their bytes get absorbed into the next
+/// named item's `leading` so doc comments stay attached to the
+/// function they document.
+///
+/// Without this, anonymous trivia would get positional anon keys
+/// (`__0__`, `__1__`, ...) that collide between sides whenever each
+/// side adds different leading trivia (a new function with its own
+/// doc comment), and the merger conflict-merges them into duplicates
+/// or orphaned-comment garbage.
 fn extract_items(root: tree_sitter::Node, source: &[u8], ext: &str) -> Vec<Item> {
     let mut items: Vec<Item> = Vec::new();
-    let mut anon_idx = 0usize;
-    let mut prev_end = 0usize;
+    let mut prev_named_end = 0usize;
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
-        let leading = std::str::from_utf8(&source[prev_end..child.start_byte()])
+        let name = match item_name(child, source, ext) {
+            Some(n) => n,
+            None => continue, // trivia: bytes ride along in next leading
+        };
+        let leading = std::str::from_utf8(&source[prev_named_end..child.start_byte()])
             .unwrap_or("")
             .to_string();
         let text = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
             .unwrap_or("")
             .to_string();
-        prev_end = child.end_byte();
+        prev_named_end = child.end_byte();
         let kind = child.kind().to_string();
-        let name = item_name(child, source, ext);
-        match name {
-            Some(n) => items.push(Item { leading, kind, name: n, text }),
-            None => {
-                // Anonymous item — assign a positional key.
-                items.push(Item {
-                    leading,
-                    kind: "__anon__".to_string(),
-                    name: format!("__{anon_idx}__"),
-                    text,
-                });
-                anon_idx += 1;
-            }
+        items.push(Item { leading, kind, name, text });
+    }
+    // Capture any trailing bytes after the last named item (typically
+    // just a final newline; occasionally a trailing trivia comment).
+    // Carry them as a synthetic anon item so reassembly preserves
+    // file-ending whitespace exactly.
+    let src_len = source.len();
+    if prev_named_end < src_len {
+        let trailing = std::str::from_utf8(&source[prev_named_end..src_len])
+            .unwrap_or("")
+            .to_string();
+        if !trailing.trim().is_empty() {
+            // Real trailing content — keep it as an anon item.
+            items.push(Item {
+                leading: String::new(),
+                kind: "__trailing__".to_string(),
+                name: "__trailing__".to_string(),
+                text: trailing,
+            });
         }
+        // Pure-whitespace trailing is handled by merge_items's final
+        // newline guarantee; don't bother emitting an item for it.
     }
     items
 }

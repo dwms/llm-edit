@@ -173,6 +173,85 @@ fn read_agent_log(dir: &Path) -> Result<Vec<Op>> {
     parse_log(&text)
 }
 
+/// Sentinel marking the start of an embedded llm-edit op block in a
+/// commit message body. The block is fenced like a markdown code block;
+/// the closing fence is a line that's exactly three backticks.
+///
+/// Format inside the block: JSONL — one op per line, no trailing
+/// commas, blank lines and `# …` comment lines are allowed.
+const OPS_BLOCK_OPEN: &str = "```llm-edit-ops";
+const OPS_BLOCK_CLOSE: &str = "```";
+
+/// Extract the JSONL ops from a commit message body. Returns an empty
+/// vec if the body has no ops block; returns an error only on malformed
+/// JSON inside an opened block.
+pub fn ops_from_commit_body(body: &str) -> Result<Vec<Op>> {
+    let mut inside = false;
+    let mut buf = String::new();
+    for line in body.lines() {
+        if !inside {
+            if line.trim_end() == OPS_BLOCK_OPEN {
+                inside = true;
+            }
+            continue;
+        }
+        if line.trim_end() == OPS_BLOCK_CLOSE {
+            break;
+        }
+        buf.push_str(line);
+        buf.push('\n');
+    }
+    if !inside {
+        return Ok(Vec::new());
+    }
+    parse_log(&buf)
+}
+
+/// Walk all commits reachable from `tip` but not from `base` (i.e.
+/// `git log base..tip`), parse the ops block out of each one, and
+/// return them in oldest-first order — the same order they were
+/// authored, which is the order they should be replayed in.
+pub fn ops_in_range(base: &str, tip: &str) -> Result<Vec<Op>> {
+    let range = format!("{}..{}", base, tip);
+    // %H sha + NUL + %B body + NUL record-separator. Body can contain
+    // newlines so we use NUL as the field/record separator and
+    // `--no-merges` to skip merge commits (their ops are already
+    // accounted for by the parents we'll walk).
+    let raw = git_cmd(&[
+        "log",
+        "--reverse",
+        "--no-merges",
+        "--format=%H%x00%B%x00",
+        &range,
+    ])?;
+    let mut all = Vec::new();
+    let mut iter = raw.split('\0');
+    while let (Some(_sha), Some(body)) = (iter.next(), iter.next()) {
+        let ops = ops_from_commit_body(body)?;
+        all.extend(ops);
+    }
+    Ok(all)
+}
+
+/// Render a slice of ops into a commit-body block (including the
+/// surrounding fence). Empty input returns an empty string so
+/// `prepare-commit-msg` can append unconditionally.
+pub fn render_ops_block(ops: &[Op]) -> Result<String> {
+    if ops.is_empty() {
+        return Ok(String::new());
+    }
+    let mut out = String::new();
+    out.push_str(OPS_BLOCK_OPEN);
+    out.push('\n');
+    for op in ops {
+        out.push_str(&serde_json::to_string(op)?);
+        out.push('\n');
+    }
+    out.push_str(OPS_BLOCK_CLOSE);
+    out.push('\n');
+    Ok(out)
+}
+
 fn write_output(output: &Path, tree: &Tree, log: &[Op]) -> Result<()> {
     std::fs::create_dir_all(output)?;
     for (rel, text) in tree {
@@ -194,21 +273,21 @@ fn write_output(output: &Path, tree: &Tree, log: &[Op]) -> Result<()> {
     Ok(())
 }
 
-/// Sentinel marking the start of an embedded llm-edit op block in a
-/// commit message body. The block is fenced like a markdown code block;
-/// the closing fence is a line that's exactly three backticks.
+/// Walk every file changed in the working tree vs HEAD and try to
+/// derive structured ops from the before/after pair. For each detected
+/// pattern, append the op to `.llm-edit/log.jsonl`. Files on disk are
+/// not modified — this is a pure recording pass.
 ///
-/// Format inside the block: JSONL — one op per line, no trailing
-/// commas, blank lines and `# …` comment lines are allowed.
-/// Extract the JSONL ops from a commit message body. Returns an empty
-/// vec if the body has no ops block; returns an error only on malformed
-/// JSON inside an opened block.
-/// Walk all commits reachable from `tip` but not from `base` (i.e.
-/// `git log base..tip`), parse the ops block out of each one, and
-/// return them in oldest-first order — the same order they were
-/// authored, which is the order they should be replayed in.
-/// Render a slice of ops into a commit-body block (including the
-/// surrounding fence). Empty input returns an empty string so
+/// MVP detects ONE pattern: single-identifier rename across `.py`,
+/// `.js`, `.jsx`, `.ts`, `.tsx`, `.rs`. If exactly one identifier
+/// disappeared between HEAD and the working tree AND exactly one new
+/// identifier appeared with matching occurrence count, emit a
+/// `rename_symbol` op for that file.
+///
+/// Files where no pattern matches are reported as "no inference"
+/// — they'll fall back to text-merge via the hybrid merger.
+///
+/// Returns (inferred_count, skipped_count).
 pub fn run_infer() -> Result<(usize, usize)> {
     let repo_root = repo_root()?;
     let changed = git_cmd(&["diff", "--name-only", "HEAD"])?;
@@ -302,9 +381,9 @@ pub fn run_infer() -> Result<(usize, usize)> {
     Ok((inferred, skipped))
 }
 
-/// `prepare-commit-msg` can append unconditionally.
-/// Walk every file changed in the working tree vs HEAD and try to
-/// derive structured ops from the before/after pair. For each detected
+/// Return `Some((old, new))` if there is exactly one identifier name
+/// removed between `before` and `after` AND exactly one added, AND
+/// their occurrence counts match. Otherwise `None`.
 fn infer_rename_for(ext: &str, before: &str, after: &str) -> Option<(String, String)> {
     let lang: tree_sitter::Language = match ext {
         "py" => tree_sitter_python::LANGUAGE.into(),
@@ -348,10 +427,10 @@ fn infer_rename_for(ext: &str, before: &str, after: &str) -> Option<(String, Str
     }
 }
 
-/// pattern, append the op to `.llm-edit/log.jsonl`. Files on disk are
-/// not modified — this is a pure recording pass.
-///
-/// MVP detects ONE pattern: single-identifier rename across `.py`,
+/// Detect Python-specific add_function / delete_function / add_import
+/// patterns by comparing top-level structure between `before` and
+/// `after`. Each returned JSON value is a fully-formed op ready to
+/// serialize into the log.
 fn infer_python_patterns(
     rel: &str,
     before: &str,
@@ -471,12 +550,12 @@ fn infer_python_patterns(
     Ok(ops)
 }
 
-/// `.js`, `.jsx`, `.ts`, `.tsx`, `.rs`. If exactly one identifier
-/// disappeared between HEAD and the working tree AND exactly one new
-/// identifier appeared with matching occurrence count, emit a
-/// `rename_symbol` op for that file.
-///
-/// Files where no pattern matches are reported as "no inference"
+/// Find the (common-prefix, common-suffix) bracketed substring change
+/// between `before` and `after`. Returns `Some((old, new))` only when
+/// both substrings are non-empty AND `old` appears EXACTLY once in
+/// `before` (so the replace_in_anchor applier resolves it
+/// unambiguously). Returns `None` for pure additions, deletions,
+/// or ambiguous repeated-substring cases.
 fn single_substring_diff(before: &str, after: &str) -> Option<(String, String)> {
     let p = char_common_prefix_len(before, after);
     let s_max = before.len().min(after.len()) - p;
@@ -514,8 +593,7 @@ fn char_common_suffix_len(a: &str, b: &str) -> usize {
     len
 }
 
-/// — they'll fall back to text-merge via the hybrid merger.
-
+#[derive(Debug)]
 struct PyTopFn {
     name: String,
     /// Full `def NAME(args):\n    ...` source — what `add_function`'s
@@ -526,9 +604,9 @@ struct PyTopFn {
     body: String,
 }
 
-///
-/// Returns (inferred_count, skipped_count).
-/// Return `Some((old, new))` if there is exactly one identifier name
+/// Walk the Python module's top-level statements; for each
+/// `function_definition`, capture its name, full source text, and
+/// just the body text.
 fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> {
     let mut out: Vec<PyTopFn> = Vec::new();
     let mut cursor = root.walk();
@@ -568,9 +646,9 @@ fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> 
     out
 }
 
-/// removed between `before` and `after` AND exactly one added, AND
-/// their occurrence counts match. Otherwise `None`.
-/// Detect Python-specific add_function / delete_function / add_import
+/// Collect plain `import X` module names from the contiguous top-of-
+/// file import block. Does NOT include `from ... import ...` or aliased
+/// imports — those would need new op shapes we don't have today.
 fn python_simple_imports(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -640,25 +718,26 @@ fn collect_all_identifiers(
     }
 }
 
-/// patterns by comparing top-level structure between `before` and
-/// `after`. Each returned JSON value is a fully-formed op ready to
-/// serialize into the log.
-/// Find the (common-prefix, common-suffix) bracketed substring change
-/// between `before` and `after`. Returns `Some((old, new))` only when
-/// both substrings are non-empty AND `old` appears EXACTLY once in
-/// `before` (so the replace_in_anchor applier resolves it
-/// unambiguously). Returns `None` for pure additions, deletions,
-/// or ambiguous repeated-substring cases.
-#[derive(Debug)]/// Walk the Python module's top-level statements; for each
-/// `function_definition`, capture its name, full source text, and
-/// just the body text.
-/// Collect plain `import X` module names from the contiguous top-of-
-/// file import block. Does NOT include `from ... import ...` or aliased
-/// imports — those would need new op shapes we don't have today.
 /// End-to-end git merge using llm-edit's structured-op merger, with
 /// a per-file fallback to text-based 3-way merge for files whose
 /// changes aren't fully reachable from the recorded op-log.
 ///
+/// Why hybrid? Real repos rarely have 100% of edits recorded as ops:
+/// most changes (logic edits, comment tweaks, file additions) don't
+/// match an op type and are made via the regular editor. A pure
+/// op-log merge would silently drop those edits. The hybrid path
+/// uses semantic merging for files where ops are sufficient, and
+/// falls back to `diff3 -m` for the rest. Logged ops still propagate
+/// across to additive payloads (renames into new function bodies,
+/// CSS class renames into HTML attrs) — that part isn't gated on
+/// per-file coverage.
+///
+/// Exit codes:
+/// - 0: clean merge; working tree updated; merge commit created if
+///   `commit` is true.
+/// - 1: at least one file had a text-merge conflict OR a semantic
+///   conflict. `.llm-edit/conflicts.txt` lists semantic conflicts.
+///   Conflict markers in source files mark text conflicts.
 pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
     let ours_sha = git_cmd(&["rev-parse", "HEAD"])?.trim().to_string();
     let theirs_sha = git_cmd(&["rev-parse", branch])?.trim().to_string();
@@ -889,22 +968,22 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
     Ok(0)
 }
 
-/// Why hybrid? Real repos rarely have 100% of edits recorded as ops:
-/// most changes (logic edits, comment tweaks, file additions) don't
-/// match an op type and are made via the regular editor. A pure
-/// op-log merge would silently drop those edits. The hybrid path
-/// uses semantic merging for files where ops are sufficient, and
-/// falls back to `diff3 -m` for the rest. Logged ops still propagate
-/// across to additive payloads (renames into new function bodies,
-/// CSS class renames into HTML attrs) — that part isn't gated on
-/// per-file coverage.
+/// Replay every commit on the current branch (between `merge-base(HEAD, onto)`
+/// and `HEAD`) onto `onto`, using llm-edit's hybrid merger to compose
+/// each commit's changes with whatever's already been applied during
+/// the rebase. Branch ref ends up pointing at the new tip; working
+/// tree is reset to match.
 ///
+/// On semantic OR text conflict during any commit's replay, leaves
+/// HEAD detached at the partially-rebased state so the user can
+/// inspect / resolve, and returns 1. (No `--continue` / `--abort`
+/// support yet — tracked on #42 as future work.)
 pub fn run_git_rebase(onto: &str) -> Result<i32> {
     run_git_rebase_ex(onto, false)
 }
 
-/// Exit codes:
-/// - 0: clean merge; working tree updated; merge commit created if
+/// Internal entry point used by the binary. `interactive` controls whether
+/// we open `$EDITOR` on a todo file before replay.
 pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
     let state_path = rebase_state_path()?;
     if state_path.exists() {
@@ -1038,9 +1117,9 @@ pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
     rebase_loop(&mut state)
 }
 
-///   `commit` is true.
-/// - 1: at least one file had a text-merge conflict OR a semantic
-///   conflict. `.llm-edit/conflicts.txt` lists semantic conflicts.
+/// Resume a rebase that previously stopped on conflict. Commits the
+/// current working tree as the replay of `commits_remaining[0]`, then
+/// continues the loop with the remaining commits.
 pub fn run_git_rebase_continue() -> Result<i32> {
     let state_path = rebase_state_path()?;
     if !state_path.exists() {
@@ -1093,13 +1172,13 @@ pub fn run_git_rebase_continue() -> Result<i32> {
     rebase_loop(&mut state)
 }
 
-///   Conflict markers in source files mark text conflicts.
-/// Replay every commit on the current branch (between `merge-base(HEAD, onto)`
-/// and `HEAD`) onto `onto`, using llm-edit's hybrid merger to compose
-/// each commit's changes with whatever's already been applied during
-/// the rebase. Branch ref ends up pointing at the new tip; working
-/// tree is reset to match.
-///
+/// Given a resolved tree (already written via `write-tree`) and the
+/// todo entry it represents, produce the new `rebase_head` according to
+/// the entry's action. For drop, this is a no-op (caller should have
+/// filtered drops out). For pick/reword, builds a child commit on top
+/// of rebase_head. For squash/fixup, rewrites rebase_head in place by
+/// creating a new commit with the SAME parent as the current
+/// rebase_head (effectively replacing it).
 fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str) -> Result<()> {
     match entry.action {
         TodoAction::Drop => Ok(()),
@@ -1178,8 +1257,8 @@ fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str)
     }
 }
 
-/// On semantic OR text conflict during any commit's replay, leaves
-/// HEAD detached at the partially-rebased state so the user can
+/// Abort an in-progress rebase. Restores the original branch to its
+/// pre-rebase SHA, checks it out, and removes the state file.
 pub fn run_git_rebase_abort() -> Result<i32> {
     let state_path = rebase_state_path()?;
     if !state_path.exists() {
@@ -1209,9 +1288,9 @@ pub fn run_git_rebase_abort() -> Result<i32> {
     Ok(0)
 }
 
-/// inspect / resolve, and returns 1. (No `--continue` / `--abort`
-/// support yet — tracked on #42 as future work.)
-/// Internal entry point used by the binary. `interactive` controls whether
+/// Replay state.commits_remaining onto state.rebase_head. Persists the
+/// updated state after each successful step, and on conflict. On clean
+/// completion, moves the branch ref + checks out + removes state.
 fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
     while !state.todo.is_empty() {
         let entry = state.todo[0].clone();
@@ -1412,10 +1491,10 @@ fn read_rebase_state() -> Result<RebaseState> {
     Ok(serde_json::from_str(&body)?)
 }
 
-/// we open `$EDITOR` on a todo file before replay.
-/// Resume a rebase that previously stopped on conflict. Commits the
-/// current working tree as the replay of `commits_remaining[0]`, then
-/// continues the loop with the remaining commits.
+/// Write the todo to `.git/llm-edit-rebase/todo.txt`, invoke the user's
+/// editor on it, re-read, and parse back into `TodoEntry` structs.
+/// Unknown / blank / comment lines are skipped. Lines whose action is
+/// unrecognized abort the rebase with an error.
 fn edit_todo(initial: Vec<TodoEntry>) -> Result<Vec<TodoEntry>> {
     let state_dir = rebase_state_path()?
         .parent()
@@ -1480,8 +1559,8 @@ fn short_sha(sha: &str) -> String {
     sha[..7.min(sha.len())].to_string()
 }
 
-/// Given a resolved tree (already written via `write-tree`) and the
-/// todo entry it represents, produce the new `rebase_head` according to
+/// Invoke the rebase editor on a file path. Respects
+/// `LLM_EDIT_REBASE_EDITOR`, then `$EDITOR`, then falls back to `vi`.
 fn run_editor(path: &Path) -> Result<()> {
     let editor = std::env::var("LLM_EDIT_REBASE_EDITOR")
         .ok()
@@ -1500,9 +1579,9 @@ fn run_editor(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// the entry's action. For drop, this is a no-op (caller should have
-/// filtered drops out). For pick/reword, builds a child commit on top
-/// of rebase_head. For squash/fixup, rewrites rebase_head in place by
+/// Seed a temp file with `initial`, open the editor on it, return the
+/// edited content (with a trailing newline trimmed). Used for reword /
+/// squash message prompts.
 fn run_editor_on_text(initial: &str, filename: &str) -> Result<String> {
     let dir = rebase_state_path()?
         .parent()
@@ -1517,8 +1596,8 @@ fn run_editor_on_text(initial: &str, filename: &str) -> Result<String> {
     Ok(content)
 }
 
-/// creating a new commit with the SAME parent as the current
-/// rebase_head (effectively replacing it).
+/// Drop comment lines (lines starting with `#`) and trim a trailing
+/// newline. Preserves blank lines inside the body.
 fn strip_comments(s: &str) -> String {
     let mut out = String::new();
     for line in s.lines() {
@@ -1568,10 +1647,10 @@ enum RebaseStep {
     },
 }
 
-/// Abort an in-progress rebase. Restores the original branch to its
-/// pre-rebase SHA, checks it out, and removes the state file.
-/// Replay state.commits_remaining onto state.rebase_head. Persists the
-/// updated state after each successful step, and on conflict. On clean
+/// One rebase step: hybrid-merge `theirs` (the commit being replayed)
+/// into `ours` (the in-progress rebase tip) on top of `base` (theirs's
+/// original parent). Mirrors `run_git_merge`'s hybrid logic but
+/// without committing — caller does that.
 fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<RebaseStep> {
     let base_tree_raw = git_extract_tree(base_sha)?;
     let ours_tree_raw = git_extract_tree(ours_sha)?;
@@ -1693,16 +1772,16 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
     })
 }
 
-/// completion, moves the branch ref + checks out + removes state.
-/// Write the todo to `.git/llm-edit-rebase/todo.txt`, invoke the user's
-/// editor on it, re-read, and parse back into `TodoEntry` structs.
-/// Unknown / blank / comment lines are skipped. Lines whose action is
-/// unrecognized abort the rebase with an error.
-/// Invoke the rebase editor on a file path. Respects
-/// `LLM_EDIT_REBASE_EDITOR`, then `$EDITOR`, then falls back to `vi`.
-/// Seed a temp file with `initial`, open the editor on it, return the
-/// edited content (with a trailing newline trimmed). Used for reword /
-/// squash message prompts.
+/// 3-way text merge via `diff3 -m`. Tmpfiles for inputs; output is
+/// the merged string (possibly containing conflict markers).
+/// True when `text` parses cleanly under the tree-sitter grammar for
+/// `path`'s extension. For unknown extensions, returns true (no
+/// validation possible). For supported extensions, a parse with any
+/// `ERROR` node anywhere in the tree returns false — a signal that
+/// text-merge fallback produced syntactically broken output and the
+/// file should be flagged as a conflict instead of silently shipped.
+/// 3-way text merge via `diff3 -m`. Tmpfiles for inputs; output is
+/// the merged string (possibly containing conflict markers).
 fn diff3_merge_strings(ours: &str, base: &str, theirs: &str) -> Result<String> {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -1750,20 +1829,20 @@ pub fn parses_cleanly(path: &Path, text: &str) -> bool {
     !tree.root_node().has_error()
 }
 
-/// Drop comment lines (lines starting with `#`) and trim a trailing
-/// newline. Preserves blank lines inside the body.
-/// One rebase step: hybrid-merge `theirs` (the commit being replayed)
-/// into `ours` (the in-progress rebase tip) on top of `base` (theirs's
-/// original parent). Mirrors `run_git_merge`'s hybrid logic but
-/// without committing — caller does that.
-/// 3-way text merge via `diff3 -m`. Tmpfiles for inputs; output is
-/// the merged string (possibly containing conflict markers).
-/// True when `text` parses cleanly under the tree-sitter grammar for
-/// `path`'s extension. For unknown extensions, returns true (no
-/// validation possible). For supported extensions, a parse with any
-/// `ERROR` node anywhere in the tree returns false — a signal that
-/// text-merge fallback produced syntactically broken output and the
-/// file should be flagged as a conflict instead of silently shipped.
+/// merge-base), run `merge_trees_and_ops`, then write the requested
+/// file's merged content back to `ours_path` and the merged op-log back
+/// to `.llm-edit/log.jsonl` inside the working tree. The whole-tree
+/// merge is what makes cross-file rewrites (class renames that touch
+/// HTML + CSS, project-scoped symbol renames) land correctly.
+///
+/// Performance note: each of git's per-file invocations redoes the
+/// whole-tree merge. That's wasteful but correct; a deterministic
+/// cache keyed on the three SHAs would be the v2 improvement.
+///
+/// Exit codes follow git's merge-driver contract:
+/// - 0: clean merge; `ours_path` now contains merged content.
+/// - 1: conflict; `ours_path` unchanged and a `.llm-edit/conflicts.txt`
+///   is written at the repo root for human attention.
 pub fn run_merge_driver(
     _base_path: &Path,
     ours_path: &Path,
@@ -1846,8 +1925,8 @@ fn git_cmd(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8(out.stdout).unwrap_or_default())
 }
 
-/// 3-way text merge via `diff3 -m`. Tmpfiles for inputs; output is
-/// the merged string (possibly containing conflict markers).
+/// Read the first ref from `.git/MERGE_HEAD` during an active merge.
+/// Falls back to `git rev-parse MERGE_HEAD` if the file isn't present.
 fn read_merge_head() -> Result<String> {
     let git_dir = git_cmd(&["rev-parse", "--git-dir"])?;
     let mh = PathBuf::from(git_dir.trim()).join("MERGE_HEAD");
@@ -1864,7 +1943,7 @@ fn repo_root() -> Result<PathBuf> {
     Ok(PathBuf::from(s.trim()))
 }
 
-/// merge-base), run `merge_trees_and_ops`, then write the requested
+/// Extract every file at a given git ref into an in-memory Tree.
 fn git_extract_tree(sha: &str) -> Result<Tree> {
     let listing = git_cmd(&["ls-tree", "-r", "--name-only", sha])?;
     let mut tree = Tree::new();
@@ -1894,13 +1973,13 @@ fn append_op_to_log(cwd: &Path, op_json: &str) -> Result<()> {
     Ok(())
 }
 
-/// file's merged content back to `ours_path` and the merged op-log back
-/// to `.llm-edit/log.jsonl` inside the working tree. The whole-tree
-/// merge is what makes cross-file rewrites (class renames that touch
-/// HTML + CSS, project-scoped symbol renames) land correctly.
-///
-/// Performance note: each of git's per-file invocations redoes the
-/// whole-tree merge. That's wasteful but correct; a deterministic
+/// Record a `delete_node` op that targets a comment identified by
+/// content-hash (not positional index). Computes a stable `node_id` from
+/// `(fn_name, normalized comment text)`, persists it to
+/// `.llm-edit/nodes.json` as the registry, emits an op carrying the
+/// `node_id` plus the inline text the applier needs, and applies the
+/// delete. Survives concurrent inserts of sibling comments that would
+/// drift a positional `{kind: "comment", index: N}` anchor.
 pub fn record_delete_comment(
     cwd: &Path,
     file: &str,
@@ -1946,8 +2025,7 @@ pub fn record_delete_comment(
     apply_op_json(cwd, &op.to_string())
 }
 
-/// cache keyed on the three SHAs would be the v2 improvement.
-
+#[cfg(test)]
 mod parse_check_tests {
     use super::parses_cleanly;
     use std::path::Path;
@@ -2089,82 +2167,4 @@ mod tests {
 "#;
         assert!(!parses_cleanly(Path::new("foo.rs"), broken));
     }
-}const OPS_BLOCK_OPEN: &str = "```llm-edit-ops";
-const OPS_BLOCK_CLOSE: &str = "```";pub fn ops_from_commit_body(body: &str) -> Result<Vec<Op>> {
-    let mut inside = false;
-    let mut buf = String::new();
-    for line in body.lines() {
-        if !inside {
-            if line.trim_end() == OPS_BLOCK_OPEN {
-                inside = true;
-            }
-            continue;
-        }
-        if line.trim_end() == OPS_BLOCK_CLOSE {
-            break;
-        }
-        buf.push_str(line);
-        buf.push('\n');
-    }
-    if !inside {
-        return Ok(Vec::new());
-    }
-    parse_log(&buf)
-}pub fn ops_in_range(base: &str, tip: &str) -> Result<Vec<Op>> {
-    let range = format!("{}..{}", base, tip);
-    // %H sha + NUL + %B body + NUL record-separator. Body can contain
-    // newlines so we use NUL as the field/record separator and
-    // `--no-merges` to skip merge commits (their ops are already
-    // accounted for by the parents we'll walk).
-    let raw = git_cmd(&[
-        "log",
-        "--reverse",
-        "--no-merges",
-        "--format=%H%x00%B%x00",
-        &range,
-    ])?;
-    let mut all = Vec::new();
-    let mut iter = raw.split('\0');
-    while let (Some(_sha), Some(body)) = (iter.next(), iter.next()) {
-        let ops = ops_from_commit_body(body)?;
-        all.extend(ops);
-    }
-    Ok(all)
-}pub fn render_ops_block(ops: &[Op]) -> Result<String> {
-    if ops.is_empty() {
-        return Ok(String::new());
-    }
-    let mut out = String::new();
-    out.push_str(OPS_BLOCK_OPEN);
-    out.push('\n');
-    for op in ops {
-        out.push_str(&serde_json::to_string(op)?);
-        out.push('\n');
-    }
-    out.push_str(OPS_BLOCK_CLOSE);
-    out.push('\n');
-    Ok(out)
-}///
-/// Exit codes follow git's merge-driver contract:
-/// - 0: clean merge; `ours_path` now contains merged content.
-/// - 1: conflict; `ours_path` unchanged and a `.llm-edit/conflicts.txt`
-///   is written at the repo root for human attention.
-
-
-/// Read the first ref from `.git/MERGE_HEAD` during an active merge.
-/// Falls back to `git rev-parse MERGE_HEAD` if the file isn't present.
-
-
-/// Extract every file at a given git ref into an in-memory Tree.
-
-
-/// Record a `delete_node` op that targets a comment identified by
-/// content-hash (not positional index). Computes a stable `node_id` from
-/// `(fn_name, normalized comment text)`, persists it to
-/// `.llm-edit/nodes.json` as the registry, emits an op carrying the
-/// `node_id` plus the inline text the applier needs, and applies the
-/// delete. Survives concurrent inserts of sibling comments that would
-/// drift a positional `{kind: "comment", index: N}` anchor.
-
-
-#[cfg(test)]
+}
