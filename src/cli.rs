@@ -38,7 +38,7 @@ impl TodoAction {
         }
     }
 
-    fn as_str(&self) -> &'static str {
+    fn as_word(&self) -> &'static str {
         match self {
             Self::Pick => "pick",
             Self::Drop => "drop",
@@ -1276,7 +1276,7 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
                 if !suffix.is_empty() {
                     suffix.push(')');
                 }
-                eprintln!("  [{}] {}{}", short, entry.action.as_str(), suffix);
+                eprintln!("  [{}] {}{}", short, entry.action.as_word(), suffix);
                 git_cmd(&["read-tree", "--reset", "-u", &state.rebase_head])?;
                 let repo_root = repo_root()?;
                 for (rel, content) in &tree {
@@ -1418,7 +1418,7 @@ fn edit_todo(initial: Vec<TodoEntry>) -> Result<Vec<TodoEntry>> {
 
     let mut body = String::new();
     for e in &initial {
-        body.push_str(&format!("{} {} {}\n", e.action.as_str(), short_sha(&e.sha), e.subject));
+        body.push_str(&format!("{} {} {}\n", e.action.as_word(), short_sha(&e.sha), e.subject));
     }
     body.push_str("\n# Commands:\n");
     body.push_str("#   p, pick   = use commit\n");
