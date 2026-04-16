@@ -1129,3 +1129,48 @@ fn git_merge_ast_resolves_disjoint_rust_function_edits() {
     // Sanity: beta untouched.
     assert!(merged.contains("fn beta() -> i32 {\n    2\n}"), "beta corrupted:\n{}", merged);
 }
+
+/// Recursive AST merge: two branches each add a new method to the same
+/// `impl` block. Whole-item diff3 would conflict on the line just
+/// before the closing `}`; recursive merge sees them as separate
+/// sub-items and keeps both.
+#[test]
+fn git_merge_ast_recurses_into_impl_block_method_adds() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    let base = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> i32 { 1 }\n    fn b(&self) -> i32 { 2 }\n}\n";
+    fs::write(repo.join("lib.rs"), base).unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    run("git", &["checkout", "-b", "theirs", "-q"], repo);
+    let theirs = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> i32 { 1 }\n    fn b(&self) -> i32 { 2 }\n    fn d(&self) -> i32 { 4 }\n}\n";
+    fs::write(repo.join("lib.rs"), theirs).unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "theirs: add d"], repo);
+
+    run("git", &["checkout", "main", "-q"], repo);
+    let ours = "struct Foo;\n\nimpl Foo {\n    fn a(&self) -> i32 { 1 }\n    fn b(&self) -> i32 { 2 }\n    fn c(&self) -> i32 { 3 }\n}\n";
+    fs::write(repo.join("lib.rs"), ours).unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "ours: add c"], repo);
+
+    run_llm_edit(&["git-merge", "theirs"], repo);
+
+    let merged = fs::read_to_string(repo.join("lib.rs")).unwrap();
+    assert!(
+        !merged.contains("<<<<<<<"),
+        "recursive AST merge should produce no conflict markers:\n{}",
+        merged
+    );
+    for needed in &["fn a(&self)", "fn b(&self)", "fn c(&self)", "fn d(&self)"] {
+        assert!(merged.contains(needed), "missing method {}:\n{}", needed, merged);
+    }
+}
