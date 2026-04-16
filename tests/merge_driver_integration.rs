@@ -42,7 +42,8 @@ fn run_llm_edit(args: &[&str], cwd: &Path) {
     run(bin, args, cwd);
 }
 
-#[test]
+/// Stage everything and commit with `subject`, embedding any pending
+
 
 fn git_merge_propagates_rename_into_new_caller() {
     let dir = tempdir().unwrap();
@@ -69,8 +70,7 @@ fn git_merge_propagates_rename_into_new_caller() {
         ],
         repo,
     );
-    run("git", &["add", "."], repo);
-    run("git", &["commit", "-q", "-m", "theirs: add caller"], repo);
+    commit_with_ops(repo, "theirs: add caller");
 
     // Back to `main`: rename user_id → account_id.
     run("git", &["checkout", "main", "-q"], repo);
@@ -84,11 +84,10 @@ fn git_merge_propagates_rename_into_new_caller() {
         ],
         repo,
     );
-    run("git", &["add", "."], repo);
-    run("git", &["commit", "-q", "-m", "main: rename"], repo);
+    commit_with_ops(repo, "main: rename");
 
-    // The integration point: our CLI does the whole-tree merge using
-    // each side's `.llm-edit/log.jsonl`.
+    // The integration point: our CLI does the whole-tree merge by
+    // walking each side's commit-body op blocks.
     run_llm_edit(&["git-merge", "theirs"], repo);
 
     let app = fs::read_to_string(repo.join("app.py")).unwrap();
@@ -109,17 +108,26 @@ fn git_merge_propagates_rename_into_new_caller() {
         app
     );
 
-    // Merged log carries both ops forward for the next generation.
-    let log = fs::read_to_string(repo.join(".llm-edit/log.jsonl")).unwrap();
+    // Both ops are reachable from the merge commit via git log
+    // (event-sourced model — no log.jsonl writeback needed).
+    let combined_bodies = String::from_utf8(
+        Command::new("git")
+            .args(["log", "--format=%B"])
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
     assert!(
-        log.contains("rename_symbol"),
-        "merged log missing rename_symbol:\n{}",
-        log
+        combined_bodies.contains("rename_symbol"),
+        "rename_symbol op missing from commit history:\n{}",
+        combined_bodies
     );
     assert!(
-        log.contains("add_function"),
-        "merged log missing add_function:\n{}",
-        log
+        combined_bodies.contains("add_function"),
+        "add_function op missing from commit history:\n{}",
+        combined_bodies
     );
 
     // A merge commit exists with two parents.
@@ -137,15 +145,16 @@ fn git_merge_propagates_rename_into_new_caller() {
     );
 }
 
-/// Hybrid mode: one side has an unrecorded text edit alongside a
+/// ops from `.llm-edit/log.jsonl` into the commit body's
 
-/// recorded op. The unrecorded edit must survive the merge (text
+/// ```llm-edit-ops fenced block. Mirrors what the prepare-commit-msg +
 
-/// fallback for that file) while the other file's recorded op still
+/// post-commit hooks do in real workflows: ops migrate from the
 
-/// merges semantically.
+/// staging file into the commit message and the staging file is
 
-#[test]
+/// cleared.
+
 
 fn git_merge_hybrid_preserves_unrecorded_edits() {
     let dir = tempdir().unwrap();
@@ -180,8 +189,7 @@ fn git_merge_hybrid_preserves_unrecorded_edits() {
         ],
         repo,
     );
-    run("git", &["add", "."], repo);
-    run("git", &["commit", "-q", "-m", "theirs: add twice"], repo);
+    commit_with_ops(repo, "theirs: add twice");
 
     // main: recorded rename + UNrecorded comment edit on the SAME file.
     run("git", &["checkout", "main", "-q"], repo);
@@ -192,12 +200,7 @@ fn git_merge_hybrid_preserves_unrecorded_edits() {
     let mut app = fs::read_to_string(repo.join("app.py")).unwrap();
     app.push_str("# fetches the canonical id\n");
     fs::write(repo.join("app.py"), app).unwrap();
-    run("git", &["add", "."], repo);
-    run(
-        "git",
-        &["commit", "-q", "-m", "main: rename + comment"],
-        repo,
-    );
+    commit_with_ops(repo, "main: rename + comment");
 
     // Merge.
     run_llm_edit(&["git-merge", "theirs"], repo);
@@ -223,21 +226,28 @@ fn git_merge_hybrid_preserves_unrecorded_edits() {
         util
     );
 
-    // Merged log carries the recorded ops forward.
-    let log = fs::read_to_string(repo.join(".llm-edit/log.jsonl")).unwrap();
-    assert!(log.contains("rename_symbol"), "log missing rename:\n{}", log);
-    assert!(log.contains("add_function"), "log missing add_function:\n{}", log);
+    // Both ops reachable via git log of the merged history.
+    let combined_bodies = String::from_utf8(
+        Command::new("git")
+            .args(["log", "--format=%B"])
+            .current_dir(repo)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    assert!(combined_bodies.contains("rename_symbol"), "rename_symbol missing from history");
+    assert!(combined_bodies.contains("add_function"), "add_function missing from history");
 }
 
-/// `llm-edit infer` derives a rename_symbol op from a textual edit.
+#[test]
+/// Hybrid mode: one side has an unrecorded text edit alongside a
 
-/// The user edits a file directly (no CLI), runs `infer`, and the log
+/// recorded op. The unrecorded edit must survive the merge (text
 
-/// gains a rename op describing what they did. After this, future
+/// fallback for that file) while the other file's recorded op still
 
-/// merges treat the file as ops-covered (semantic path) instead of
-
-/// falling back to text.
+/// merges semantically.
 
 #[test]
 
@@ -293,11 +303,12 @@ fn infer_detects_single_identifier_rename() {
     assert_eq!(app, "def get(account_id):\n    return account_id\n");
 }
 
-/// `infer` covers the Python add_function / delete_function /
+/// `llm-edit infer` derives a rename_symbol op from a textual edit.
 
-/// add_import patterns when the diff isn't a pure rename.
+/// The user edits a file directly (no CLI), runs `infer`, and the log
 
-#[test]
+/// gains a rename op describing what they did. After this, future
+
 
 fn infer_detects_python_structural_diffs() {
     let dir = tempdir().unwrap();
@@ -335,13 +346,13 @@ fn infer_detects_python_structural_diffs() {
     assert!(log.contains("\"module\":\"sys\""), "add_import should reference sys:\n{}", log);
 }
 
-/// `llm-edit git-rebase` replays the current branch's commits onto a
+/// merges treat the file as ops-covered (semantic path) instead of
 
-/// new base, with each commit's recorded ops getting rewritten through
-
-/// the new base's own ops.
+/// falling back to text.
 
 #[test]
+/// `infer` covers the Python add_function / delete_function /
+
 
 fn git_rebase_replays_commits_with_op_propagation() {
     let dir = tempdir().unwrap();
@@ -371,8 +382,7 @@ fn git_rebase_replays_commits_with_op_propagation() {
         ],
         repo,
     );
-    run("git", &["add", "."], repo);
-    run("git", &["commit", "-q", "-m", "feat: add caller"], repo);
+    commit_with_ops(repo, "feat: add caller");
 
     // Back to main: rename user_id → account_id.
     run("git", &["checkout", "main", "-q"], repo);
@@ -380,8 +390,7 @@ fn git_rebase_replays_commits_with_op_propagation() {
         &["rename-symbol", "--file", "app.py", "user_id", "account_id"],
         repo,
     );
-    run("git", &["add", "."], repo);
-    run("git", &["commit", "-q", "-m", "main: rename"], repo);
+    commit_with_ops(repo, "main: rename");
 
     // Switch to feat and rebase onto main.
     run("git", &["checkout", "feat", "-q"], repo);
@@ -418,13 +427,13 @@ fn git_rebase_replays_commits_with_op_propagation() {
     );
 }
 
-/// `git-rebase --continue` after a text-fallback conflict: the user
-
-/// resolves the overlapping edit manually, then --continue finishes
-
-/// the rebase with the expected linear history.
+/// add_import patterns when the diff isn't a pure rename.
 
 #[test]
+/// `llm-edit git-rebase` replays the current branch's commits onto a
+
+/// new base, with each commit's recorded ops getting rewritten through
+
 
 fn git_rebase_continue_after_text_conflict() {
     let dir = tempdir().unwrap();
@@ -527,11 +536,11 @@ fn git_rebase_continue_after_text_conflict() {
     );
 }
 
-/// `git-rebase --abort` after a text-fallback conflict: original branch
-
-/// is restored to its pre-rebase tip and HEAD is re-attached to it.
+/// the new base's own ops.
 
 #[test]
+/// `git-rebase --continue` after a text-fallback conflict: the user
+
 
 fn git_rebase_abort_restores_original() {
     let dir = tempdir().unwrap();
@@ -624,13 +633,13 @@ fn git_rebase_abort_restores_original() {
     assert_eq!(app, "def get():\n    return 20\n");
 }
 
-// ---- interactive rebase helpers --------------------------------------
+/// resolves the overlapping edit manually, then --continue finishes
 
-/// Write an executable shell script that will be handed to llm-edit via
 
-/// `LLM_EDIT_REBASE_EDITOR`. The script receives the file to edit as
+/// the rebase with the expected linear history.
 
-/// its first (and only) positional arg.
+#[test]
+/// `git-rebase --abort` after a text-fallback conflict: original branch
 
 fn write_editor_script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
     let path = dir.join(name);
@@ -645,10 +654,9 @@ fn write_editor_script(dir: &Path, name: &str, body: &str) -> std::path::PathBuf
     path
 }
 
-/// Set up a linear 3-commit feat branch (a, middle, c) on top of `main`
+/// is restored to its pre-rebase tip and HEAD is re-attached to it.
 
-/// with no overlapping changes so rebase onto main is conflict-free.
-
+#[test]
 fn setup_three_commit_branch(repo: &Path) {
     run("git", &["init", "-q", "--initial-branch=main"], repo);
     run("git", &["config", "user.email", "test@test"], repo);
@@ -706,11 +714,11 @@ fn commit_subjects(repo: &Path, rev: &str) -> Vec<String> {
         .collect()
 }
 
-/// `git-rebase -i` with the middle commit marked `drop`: resulting
+// ---- interactive rebase helpers --------------------------------------
+/// Write an executable shell script that will be handed to llm-edit via
 
-/// branch has 2 commits, no trace of the middle one.
+/// `LLM_EDIT_REBASE_EDITOR`. The script receives the file to edit as
 
-#[test]
 
 fn git_rebase_interactive_drop() {
     let dir = tempdir().unwrap();
@@ -754,11 +762,12 @@ fn git_rebase_interactive_drop() {
     assert!(repo.join("c.txt").exists(), "later commit's file missing");
 }
 
-/// `git-rebase -i` with the last commit marked `squash`: combined
+/// its first (and only) positional arg.
 
-/// message edited; resulting branch has 2 feat commits collapsed into 1.
+/// Set up a linear 3-commit feat branch (a, middle, c) on top of `main`
 
-#[test]
+/// with no overlapping changes so rebase onto main is conflict-free.
+
 
 fn git_rebase_interactive_squash() {
     let dir = tempdir().unwrap();
@@ -812,13 +821,13 @@ fi
     assert!(repo.join("c.txt").exists(), "last's file missing after squash");
 }
 
-/// `git-rebase -i` with `fixup`: same tree result as squash, but the
+/// `git-rebase -i` with the middle commit marked `drop`: resulting
 
-/// prior commit's message is kept verbatim — no editor prompt for the
-
-/// combined message.
+/// branch has 2 commits, no trace of the middle one.
 
 #[test]
+/// `git-rebase -i` with the last commit marked `squash`: combined
+
 
 fn git_rebase_interactive_fixup() {
     let dir = tempdir().unwrap();
@@ -859,7 +868,7 @@ fn git_rebase_interactive_fixup() {
     assert!(repo.join("c.txt").exists());
 }
 
-/// `git-rebase -i` with `reword`: single commit, rename its message.
+/// message edited; resulting branch has 2 feat commits collapsed into 1.
 
 #[test]
 
@@ -922,11 +931,12 @@ fi
     );
 }
 
-/// `infer` derives a `replace_in_anchor` op for a single substring
+/// `git-rebase -i` with `fixup`: same tree result as squash, but the
 
-/// change inside a function body.
+/// prior commit's message is kept verbatim — no editor prompt for the
 
-#[test]
+/// combined message.
+
 
 fn infer_detects_replace_in_anchor() {
     let dir = tempdir().unwrap();
@@ -966,9 +976,8 @@ fn infer_detects_replace_in_anchor() {
     assert!(log.contains("\"name\":\"total\""), "wrong fn:\n{}", log);
 }
 
-/// Run llm-edit with env vars and return the exit code instead of
-
-/// asserting success.
+#[test]
+/// `git-rebase -i` with `reword`: single commit, rename its message.
 
 fn run_llm_edit_with_env_code(args: &[&str], cwd: &Path, env: &[(&str, &str)]) -> i32 {
     let bin = env!("CARGO_BIN_EXE_llm-edit");
@@ -981,11 +990,10 @@ fn run_llm_edit_with_env_code(args: &[&str], cwd: &Path, env: &[(&str, &str)]) -
     out.status.code().unwrap_or(-1)
 }
 
-/// `git-rebase -i` with the middle commit marked `edit`: the rebase
+#[test]
+/// `infer` derives a `replace_in_anchor` op for a single substring
 
-/// pauses (exit 1), the user modifies a file, then `--continue` amends
-
-/// the paused commit and replays the remaining commits.
+/// change inside a function body.
 
 #[test]
 
@@ -1067,6 +1075,17 @@ fn git_rebase_interactive_edit() {
     assert!(repo.join("c.txt").exists(), "last commit's file missing after edit+continue");
 }
 
+/// Run llm-edit with env vars and return the exit code instead of
+
+/// asserting success.
+
+/// `git-rebase -i` with the middle commit marked `edit`: the rebase
+
+/// pauses (exit 1), the user modifies a file, then `--continue` amends
+
+/// the paused commit and replays the remaining commits.
+
+#[test]
 /// Dogfood guarantee: AST merge cleanly resolves two non-overlapping
 
 /// edits to different functions in the same Rust file. Without
@@ -1075,17 +1094,6 @@ fn git_rebase_interactive_edit() {
 
 /// src/cli.rs has historically dropped braces or whole declarations
 
-/// when both branches edited (different) functions in the same file.
-
-///
-
-/// This test locks in the fix from #46 (tree-sitter-rust 0.24): if the
-
-/// parser can't read the file, this collapses back to text diff3 and
-
-/// the assertion below detects the regression.
-
-#[test]
 
 fn git_merge_ast_resolves_disjoint_rust_function_edits() {
     let dir = tempdir().unwrap();
@@ -1130,11 +1138,12 @@ fn git_merge_ast_resolves_disjoint_rust_function_edits() {
     assert!(merged.contains("fn beta() -> i32 {\n    2\n}"), "beta corrupted:\n{}", merged);
 }
 
-/// Recursive AST merge: two branches each add a new method to the same
-/// `impl` block. Whole-item diff3 would conflict on the line just
-/// before the closing `}`; recursive merge sees them as separate
-/// sub-items and keeps both.
-#[test]
+/// when both branches edited (different) functions in the same file.
+///
+/// This test locks in the fix from #46 (tree-sitter-rust 0.24): if the
+/// parser can't read the file, this collapses back to text diff3 and
+/// the assertion below detects the regression.
+
 fn git_merge_ast_recurses_into_impl_block_method_adds() {
     let dir = tempdir().unwrap();
     let repo = dir.path();
@@ -1175,13 +1184,12 @@ fn git_merge_ast_recurses_into_impl_block_method_adds() {
     }
 }
 
-/// Regression: AST merge must preserve original whitespace between
-/// adjacent items. Earlier `merge_items` joined every emitted item
-/// with `\n\n`, which inserted spurious blank lines between adjacent
-/// doc-comment lines (each `//!` is a separate top-level
-/// `line_comment` AST node) and adjacent `use` statements. This
-/// silently corrupted every dogfood-merged Rust source file.
-#[test]
+#[test]/// Recursive AST merge: two branches each add a new method to the same
+/// `impl` block. Whole-item diff3 would conflict on the line just
+/// before the closing `}`; recursive merge sees them as separate
+/// sub-items and keeps both.
+#[test]/// Regression: AST merge must preserve original whitespace between
+
 fn git_merge_ast_preserves_adjacent_doc_comment_and_use_spacing() {
     let dir = tempdir().unwrap();
     let repo = dir.path();
@@ -1227,4 +1235,23 @@ fn git_merge_ast_preserves_adjacent_doc_comment_and_use_spacing() {
     // Both edits applied.
     assert!(merged.contains("fn alpha() -> i32 { 11 }"), "alpha edit lost:\n{}", merged);
     assert!(merged.contains("fn gamma() -> i32 { 3 }"), "gamma add lost:\n{}", merged);
-}
+}fn commit_with_ops(repo: &Path, subject: &str) {
+    let log_path = repo.join(".llm-edit/log.jsonl");
+    let pending = fs::read_to_string(&log_path).unwrap_or_default();
+    let mut body = subject.to_string();
+    let pending_trim = pending.trim();
+    if !pending_trim.is_empty() {
+        body.push_str("\n\n```llm-edit-ops\n");
+        body.push_str(pending_trim);
+        body.push_str("\n```\n");
+        // Clear the staging file (post-commit-hook simulation).
+        fs::write(&log_path, "").unwrap();
+    }
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", &body], repo);
+}/// adjacent items. Earlier `merge_items` joined every emitted item
+/// with `\n\n`, which inserted spurious blank lines between adjacent
+/// doc-comment lines (each `//!` is a separate top-level
+/// `line_comment` AST node) and adjacent `use` statements. This
+/// silently corrupted every dogfood-merged Rust source file.
+#[test]

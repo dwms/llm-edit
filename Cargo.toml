@@ -48,6 +48,7 @@ path = "src/bin/bench.rs"
 name = "token_savings"
 path = "src/bin/token_savings.rs"
 
-[lib]
-name = "llm_edit"
-path = "src/lib.rs"
+[[bin]]
+name = "lint_parse"
+path = "src/bin/lint_parse.rs"
+

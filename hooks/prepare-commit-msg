@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# Move pending ops from .llm-edit/log.jsonl into the commit message
+# body as a fenced ```llm-edit-ops block. The merger reads ops from
+# commit bodies (event-sourced model), not from a denormalized log
+# file, so this hook is what makes ops persistent.
+#
+# Args (from git):
+#   $1  path to the commit message file (about to be edited / used)
+#   $2  source: 'message', 'template', 'merge', 'squash', 'commit'
+#   $3  sha being amended (when applicable)
+#
+# Skip cases:
+#   - merge/squash messages: ops already in parent commits
+#   - empty pending log: nothing to inject
+set -e
+
+MSG_FILE="$1"
+SOURCE="$2"
+case "$SOURCE" in
+  merge|squash)
+    exit 0
+    ;;
+esac
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+LOG_FILE="$REPO_ROOT/.llm-edit/log.jsonl"
+
+[[ -f "$LOG_FILE" ]] || exit 0
+
+# Strip blank/comment lines to test for actual ops.
+PENDING="$(grep -E '^[[:space:]]*\{' "$LOG_FILE" || true)"
+[[ -z "$PENDING" ]] && exit 0
+
+# Only inject if the message doesn't already have an ops block (avoid
+# double-injection on `git commit --amend`).
+if grep -qF '```llm-edit-ops' "$MSG_FILE"; then
+  exit 0
+fi
+
+# Append the block. Preserve any existing message content (subject +
+# body); add a blank line separator. Use printf '%s\n' instead of
+# echo because bash echo interprets backslash escapes on some
+# platforms — JSON ops contain literal \n in string values that must
+# stay as escapes, not become real newlines.
+{
+  cat "$MSG_FILE"
+  printf '\n```llm-edit-ops\n'
+  printf '%s\n' "$PENDING"
+  printf '```\n'
+} > "$MSG_FILE.tmp"
+mv "$MSG_FILE.tmp" "$MSG_FILE"

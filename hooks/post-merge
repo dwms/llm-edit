@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Auto-rebuild target/release/llm-edit if any src/** has changed since
+# the binary was built. Eliminates the "stale binary did the merge"
+# footgun: dogfood-merging changes to llm-edit's own source with the
+# old binary silently runs the old logic, often producing subtly wrong
+# output. Hit twice during the project's own development.
+#
+# Args (from git):
+#   $1  was_squash (1 if merge was squashed, 0 otherwise)
+#
+# Runs after `git merge` and `git pull`. Cheap when nothing changed
+# (cargo decides).
+set -e
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+BIN="$REPO_ROOT/target/release/llm-edit"
+
+# Only rebuild if the binary exists (so first-time clones aren't
+# forced into a release build) AND the merge touched src/**.
+[[ -x "$BIN" ]] || exit 0
+
+# `ORIG_HEAD..HEAD` is the merge's net change set.
+if git diff --name-only ORIG_HEAD..HEAD 2>/dev/null | grep -qE '^(src/|Cargo\.(toml|lock))'; then
+  echo "post-merge: src/ changed — rebuilding llm-edit (release)" >&2
+  (cd "$REPO_ROOT" && cargo build --release --quiet) || {
+    echo "post-merge: cargo build failed; binary may be stale until you fix it" >&2
+    exit 0  # don't fail the merge itself
+  }
+fi
