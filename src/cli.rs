@@ -1,21 +1,33 @@
 //! Core recording-CLI logic: apply an op to a worktree and append it to
+
 //! the worktree's `.llm-edit/log.jsonl`; and merge two worktrees' logs
+
 //! together with persistence of the merged log to disk.
 
 use anyhow::{Context, Result, anyhow};
+
 use std::path::{Path, PathBuf};
+
 use std::process::Command;
 
 use crate::merge_logic::{MergeResult, merge_trees_and_ops};
+
 use crate::ops::{Op, parse_log};
+
 use crate::{Tree, apply_log, load_tree};
+
 use serde::{Deserialize, Serialize};
 
 /// Action for one entry in the interactive rebase todo. Mirrors a
+
 /// subset of `git rebase -i` vocabulary. `pick` is the default (same as
+
 /// the MVP non-interactive rebase).
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+
 #[serde(rename_all = "lowercase")]
+
 enum TodoAction {
     Pick,
     Drop,
@@ -51,6 +63,7 @@ impl TodoAction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+
 struct TodoEntry {
     action: TodoAction,
     sha: String,
@@ -64,12 +77,19 @@ struct TodoEntry {
 }
 
 /// Persisted state for an in-progress `llm-edit git-rebase`. Written to
+
 /// `.git/llm-edit-rebase/state.json` at rebase start, updated on each
+
 /// successful step, and consumed (+ removed) by --continue / --abort.
+
 ///
+
 /// `.git/` is gitignored by construction, so the state file is never
+
 /// tracked even though it lives inside the repo's git dir.
+
 #[derive(Debug, Serialize, Deserialize)]
+
 struct RebaseState {
     /// Branch name the rebase started on, e.g. "feat/foo".
     original_branch: String,
@@ -103,7 +123,9 @@ struct RebaseState {
 }
 
 /// Apply a single op (parsed from JSON) against `cwd`, write changed files
+
 /// back to disk, and append the op to `cwd/.llm-edit/log.jsonl`.
+
 pub fn apply_op_json(cwd: &Path, op_json: &str) -> Result<()> {
     let op: Op = serde_json::from_str(op_json)
         .with_context(|| format!("parse op JSON: {}", op_json))?;
@@ -127,8 +149,11 @@ pub fn apply_op_json(cwd: &Path, op_json: &str) -> Result<()> {
 }
 
 /// Merge two worktrees on top of `base` and write merged source + log
+
 /// to `output`. On conflict, writes `output/.llm-edit/conflicts.txt` and
+
 /// returns an error.
+
 pub fn merge_worktrees(base: &Path, ours: &Path, theirs: &Path, output: &Path) -> Result<()> {
     let base_tree = load_tree(base).with_context(|| format!("load base {}", base.display()))?;
     let ops_a = read_agent_log(ours)?;
@@ -180,20 +205,35 @@ fn write_output(output: &Path, tree: &Tree, log: &[Op]) -> Result<()> {
 }
 
 /// Walk every file changed in the working tree vs HEAD and try to
+
 /// derive structured ops from the before/after pair. For each detected
+
 /// pattern, append the op to `.llm-edit/log.jsonl`. Files on disk are
+
 /// not modified — this is a pure recording pass.
+
 ///
+
 /// MVP detects ONE pattern: single-identifier rename across `.py`,
+
 /// `.js`, `.jsx`, `.ts`, `.tsx`, `.rs`. If exactly one identifier
+
 /// disappeared between HEAD and the working tree AND exactly one new
+
 /// identifier appeared with matching occurrence count, emit a
+
 /// `rename_symbol` op for that file.
+
 ///
+
 /// Files where no pattern matches are reported as "no inference"
+
 /// — they'll fall back to text-merge via the hybrid merger.
+
 ///
+
 /// Returns (inferred_count, skipped_count).
+
 pub fn run_infer() -> Result<(usize, usize)> {
     let repo_root = repo_root()?;
     let changed = git_cmd(&["diff", "--name-only", "HEAD"])?;
@@ -288,8 +328,11 @@ pub fn run_infer() -> Result<(usize, usize)> {
 }
 
 /// Return `Some((old, new))` if there is exactly one identifier name
+
 /// removed between `before` and `after` AND exactly one added, AND
+
 /// their occurrence counts match. Otherwise `None`.
+
 fn infer_rename_for(ext: &str, before: &str, after: &str) -> Option<(String, String)> {
     let lang: tree_sitter::Language = match ext {
         "py" => tree_sitter_python::LANGUAGE.into(),
@@ -334,9 +377,13 @@ fn infer_rename_for(ext: &str, before: &str, after: &str) -> Option<(String, Str
 }
 
 /// Detect Python-specific add_function / delete_function / add_import
+
 /// patterns by comparing top-level structure between `before` and
+
 /// `after`. Each returned JSON value is a fully-formed op ready to
+
 /// serialize into the log.
+
 fn infer_python_patterns(
     rel: &str,
     before: &str,
@@ -457,11 +504,17 @@ fn infer_python_patterns(
 }
 
 /// Find the (common-prefix, common-suffix) bracketed substring change
+
 /// between `before` and `after`. Returns `Some((old, new))` only when
+
 /// both substrings are non-empty AND `old` appears EXACTLY once in
+
 /// `before` (so the replace_in_anchor applier resolves it
+
 /// unambiguously). Returns `None` for pure additions, deletions,
+
 /// or ambiguous repeated-substring cases.
+
 fn single_substring_diff(before: &str, after: &str) -> Option<(String, String)> {
     let p = char_common_prefix_len(before, after);
     let s_max = before.len().min(after.len()) - p;
@@ -500,6 +553,7 @@ fn char_common_suffix_len(a: &str, b: &str) -> usize {
 }
 
 #[derive(Debug)]
+
 struct PyTopFn {
     name: String,
     /// Full `def NAME(args):\n    ...` source — what `add_function`'s
@@ -511,8 +565,11 @@ struct PyTopFn {
 }
 
 /// Walk the Python module's top-level statements; for each
+
 /// `function_definition`, capture its name, full source text, and
+
 /// just the body text.
+
 fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> {
     let mut out: Vec<PyTopFn> = Vec::new();
     let mut cursor = root.walk();
@@ -553,8 +610,11 @@ fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> 
 }
 
 /// Collect plain `import X` module names from the contiguous top-of-
+
 /// file import block. Does NOT include `from ... import ...` or aliased
+
 /// imports — those would need new op shapes we don't have today.
+
 fn python_simple_imports(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -625,25 +685,45 @@ fn collect_all_identifiers(
 }
 
 /// End-to-end git merge using llm-edit's structured-op merger, with
+
 /// a per-file fallback to text-based 3-way merge for files whose
+
 /// changes aren't fully reachable from the recorded op-log.
+
 ///
+
 /// Why hybrid? Real repos rarely have 100% of edits recorded as ops:
+
 /// most changes (logic edits, comment tweaks, file additions) don't
+
 /// match an op type and are made via the regular editor. A pure
+
 /// op-log merge would silently drop those edits. The hybrid path
+
 /// uses semantic merging for files where ops are sufficient, and
+
 /// falls back to `diff3 -m` for the rest. Logged ops still propagate
+
 /// across to additive payloads (renames into new function bodies,
+
 /// CSS class renames into HTML attrs) — that part isn't gated on
+
 /// per-file coverage.
+
 ///
+
 /// Exit codes:
+
 /// - 0: clean merge; working tree updated; merge commit created if
+
 ///   `commit` is true.
+
 /// - 1: at least one file had a text-merge conflict OR a semantic
+
 ///   conflict. `.llm-edit/conflicts.txt` lists semantic conflicts.
+
 ///   Conflict markers in source files mark text conflicts.
+
 pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
     let ours_sha = git_cmd(&["rev-parse", "HEAD"])?.trim().to_string();
     let theirs_sha = git_cmd(&["rev-parse", branch])?.trim().to_string();
@@ -717,7 +797,8 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
 
     let mut final_tree: Tree = Tree::new();
     let mut text_conflicts: Vec<PathBuf> = Vec::new();
-    let mut fallback_files: Vec<PathBuf> = Vec::new();
+    let mut ast_merged_files: Vec<PathBuf> = Vec::new();
+    let mut text_fallback_files: Vec<PathBuf> = Vec::new();
 
     for path in &all_files {
         let a_covered = expected_a.get(path) == ours_tree.get(path);
@@ -733,12 +814,11 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
             continue;
         }
 
-        // At least one side has unrecorded edits to this file. Fall
-        // back to diff3 of the actual contents. The semantic merger's
-        // op-log still gets persisted; cross-file propagation that
-        // was driven by ops still applied to OTHER files; this file
-        // just gets the dumb-but-honest text merge.
-        fallback_files.push(path.clone());
+        // At least one side has unrecorded edits to this file. Try
+        // AST-aware merge first; fall back to diff3 if the language
+        // isn't supported. The semantic merger's op-log still gets
+        // persisted; cross-file propagation that was driven by ops
+        // still applied to OTHER files.
         let base_c = base_tree.get(path).cloned().unwrap_or_default();
         let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
         let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
@@ -749,14 +829,18 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         // of colliding on interleaved lines. Falls back to diff3 when
         // the language isn't supported or no named items are found.
         let merged = match crate::ast_merge::ast_merge(path, &base_c, &ours_c, &theirs_c) {
-            crate::ast_merge::AstMergeResult::Clean(m) => m,
+            crate::ast_merge::AstMergeResult::Clean(m) => {
+                ast_merged_files.push(path.clone());
+                m
+            }
             crate::ast_merge::AstMergeResult::Conflict(m) => {
+                ast_merged_files.push(path.clone());
                 text_conflicts.push(path.clone());
                 final_tree.insert(path.clone(), m);
                 continue;
             }
             crate::ast_merge::AstMergeResult::NotApplicable => {
-                // Fall through to diff3.
+                text_fallback_files.push(path.clone());
                 diff3_merge_strings(&ours_c, &base_c, &theirs_c)?
             }
         };
@@ -795,11 +879,23 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
 
     git_cmd(&["add", "-A"])?;
 
-    if !fallback_files.is_empty() {
+    if !ast_merged_files.is_empty() {
+        eprintln!(
+            "llm-edit git-merge: {} file(s) AST-merged ({})",
+            ast_merged_files.len(),
+            ast_merged_files
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if !text_fallback_files.is_empty() {
         eprintln!(
             "llm-edit git-merge: {} file(s) fell back to text merge ({})",
-            fallback_files.len(),
-            fallback_files
+            text_fallback_files.len(),
+            text_fallback_files
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect::<Vec<_>>()
@@ -850,21 +946,33 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
 }
 
 /// Replay every commit on the current branch (between `merge-base(HEAD, onto)`
+
 /// and `HEAD`) onto `onto`, using llm-edit's hybrid merger to compose
+
 /// each commit's changes with whatever's already been applied during
+
 /// the rebase. Branch ref ends up pointing at the new tip; working
+
 /// tree is reset to match.
+
 ///
+
 /// On semantic OR text conflict during any commit's replay, leaves
+
 /// HEAD detached at the partially-rebased state so the user can
+
 /// inspect / resolve, and returns 1. (No `--continue` / `--abort`
+
 /// support yet — tracked on #42 as future work.)
+
 pub fn run_git_rebase(onto: &str) -> Result<i32> {
     run_git_rebase_ex(onto, false)
 }
 
 /// Internal entry point used by the binary. `interactive` controls whether
+
 /// we open `$EDITOR` on a todo file before replay.
+
 pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
     let state_path = rebase_state_path()?;
     if state_path.exists() {
@@ -999,8 +1107,11 @@ pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
 }
 
 /// Resume a rebase that previously stopped on conflict. Commits the
+
 /// current working tree as the replay of `commits_remaining[0]`, then
+
 /// continues the loop with the remaining commits.
+
 pub fn run_git_rebase_continue() -> Result<i32> {
     let state_path = rebase_state_path()?;
     if !state_path.exists() {
@@ -1054,12 +1165,19 @@ pub fn run_git_rebase_continue() -> Result<i32> {
 }
 
 /// Given a resolved tree (already written via `write-tree`) and the
+
 /// todo entry it represents, produce the new `rebase_head` according to
+
 /// the entry's action. For drop, this is a no-op (caller should have
+
 /// filtered drops out). For pick/reword, builds a child commit on top
+
 /// of rebase_head. For squash/fixup, rewrites rebase_head in place by
+
 /// creating a new commit with the SAME parent as the current
+
 /// rebase_head (effectively replacing it).
+
 fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str) -> Result<()> {
     match entry.action {
         TodoAction::Drop => Ok(()),
@@ -1139,7 +1257,9 @@ fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str)
 }
 
 /// Abort an in-progress rebase. Restores the original branch to its
+
 /// pre-rebase SHA, checks it out, and removes the state file.
+
 pub fn run_git_rebase_abort() -> Result<i32> {
     let state_path = rebase_state_path()?;
     if !state_path.exists() {
@@ -1170,8 +1290,11 @@ pub fn run_git_rebase_abort() -> Result<i32> {
 }
 
 /// Replay state.commits_remaining onto state.rebase_head. Persists the
+
 /// updated state after each successful step, and on conflict. On clean
+
 /// completion, moves the branch ref + checks out + removes state.
+
 fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
     while !state.todo.is_empty() {
         let entry = state.todo[0].clone();
@@ -1206,7 +1329,7 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
             .to_string();
 
         match rebase_step(&parent_sha, &state.rebase_head, &commit)? {
-            RebaseStep::Clean { mut tree, log, fallback_files } => {
+            RebaseStep::Clean { mut tree, log, ast_merged_files, text_fallback_files } => {
                 // Drop-awareness: for each path in drop_strip, if the
                 // merger output still matches the dropped commit's
                 // content (or is empty, meaning diff3 deleted it), drop
@@ -1231,16 +1354,21 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
                         }
                     }
                 }
-                if !fallback_files.is_empty() {
-                    eprintln!(
-                        "  [{}] {} ({} text-fallback file(s))",
-                        short,
-                        entry.action.as_str(),
-                        fallback_files.len()
-                    );
-                } else {
-                    eprintln!("  [{}] {}", short, entry.action.as_str());
+                let mut suffix = String::new();
+                if !ast_merged_files.is_empty() {
+                    suffix.push_str(&format!(" ({} AST-merged", ast_merged_files.len()));
                 }
+                if !text_fallback_files.is_empty() {
+                    if suffix.is_empty() {
+                        suffix.push_str(&format!(" ({} text-fallback", text_fallback_files.len()));
+                    } else {
+                        suffix.push_str(&format!(", {} text-fallback", text_fallback_files.len()));
+                    }
+                }
+                if !suffix.is_empty() {
+                    suffix.push(')');
+                }
+                eprintln!("  [{}] {}{}", short, entry.action.as_str(), suffix);
                 git_cmd(&["read-tree", "--reset", "-u", &state.rebase_head])?;
                 let repo_root = repo_root()?;
                 for (rel, content) in &tree {
@@ -1369,9 +1497,13 @@ fn read_rebase_state() -> Result<RebaseState> {
 }
 
 /// Write the todo to `.git/llm-edit-rebase/todo.txt`, invoke the user's
+
 /// editor on it, re-read, and parse back into `TodoEntry` structs.
+
 /// Unknown / blank / comment lines are skipped. Lines whose action is
+
 /// unrecognized abort the rebase with an error.
+
 fn edit_todo(initial: Vec<TodoEntry>) -> Result<Vec<TodoEntry>> {
     let state_dir = rebase_state_path()?
         .parent()
@@ -1437,7 +1569,9 @@ fn short_sha(sha: &str) -> String {
 }
 
 /// Invoke the rebase editor on a file path. Respects
+
 /// `LLM_EDIT_REBASE_EDITOR`, then `$EDITOR`, then falls back to `vi`.
+
 fn run_editor(path: &Path) -> Result<()> {
     let editor = std::env::var("LLM_EDIT_REBASE_EDITOR")
         .ok()
@@ -1457,8 +1591,11 @@ fn run_editor(path: &Path) -> Result<()> {
 }
 
 /// Seed a temp file with `initial`, open the editor on it, return the
+
 /// edited content (with a trailing newline trimmed). Used for reword /
+
 /// squash message prompts.
+
 fn run_editor_on_text(initial: &str, filename: &str) -> Result<String> {
     let dir = rebase_state_path()?
         .parent()
@@ -1474,7 +1611,9 @@ fn run_editor_on_text(initial: &str, filename: &str) -> Result<String> {
 }
 
 /// Drop comment lines (lines starting with `#`) and trim a trailing
+
 /// newline. Preserves blank lines inside the body.
+
 fn strip_comments(s: &str) -> String {
     let mut out = String::new();
     for line in s.lines() {
@@ -1508,7 +1647,8 @@ enum RebaseStep {
     Clean {
         tree: Tree,
         log: Vec<Op>,
-        fallback_files: Vec<PathBuf>,
+        ast_merged_files: Vec<PathBuf>,
+        text_fallback_files: Vec<PathBuf>,
     },
     Conflict {
         reason: String,
@@ -1524,9 +1664,13 @@ enum RebaseStep {
 }
 
 /// One rebase step: hybrid-merge `theirs` (the commit being replayed)
+
 /// into `ours` (the in-progress rebase tip) on top of `base` (theirs's
+
 /// original parent). Mirrors `run_git_merge`'s hybrid logic but
+
 /// without committing — caller does that.
+
 fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<RebaseStep> {
     let base_tree_raw = git_extract_tree(base_sha)?;
     let ours_tree_raw = git_extract_tree(ours_sha)?;
@@ -1584,7 +1728,8 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
         .collect();
 
     let mut final_tree: Tree = Tree::new();
-    let mut fallback_files: Vec<PathBuf> = Vec::new();
+    let mut ast_merged_files: Vec<PathBuf> = Vec::new();
+    let mut text_fallback_files: Vec<PathBuf> = Vec::new();
     let mut conflict_files: Vec<PathBuf> = Vec::new();
     let mut conflict_reasons: Vec<String> = Vec::new();
 
@@ -1599,19 +1744,23 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
             continue;
         }
 
-        fallback_files.push(path.clone());
         let base_c = base_tree.get(path).cloned().unwrap_or_default();
         let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
         let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
         let merged = match crate::ast_merge::ast_merge(path, &base_c, &ours_c, &theirs_c) {
-            crate::ast_merge::AstMergeResult::Clean(m) => m,
+            crate::ast_merge::AstMergeResult::Clean(m) => {
+                ast_merged_files.push(path.clone());
+                m
+            }
             crate::ast_merge::AstMergeResult::Conflict(m) => {
+                ast_merged_files.push(path.clone());
                 conflict_files.push(path.clone());
                 conflict_reasons.push(format!("{} (AST per-item conflict)", path.display()));
                 final_tree.insert(path.clone(), m);
                 continue;
             }
             crate::ast_merge::AstMergeResult::NotApplicable => {
+                text_fallback_files.push(path.clone());
                 diff3_merge_strings(&ours_c, &base_c, &theirs_c)?
             }
         };
@@ -1642,20 +1791,31 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
     Ok(RebaseStep::Clean {
         tree: final_tree,
         log: merged_log_ops,
-        fallback_files,
+        ast_merged_files,
+        text_fallback_files,
     })
 }
 
 /// 3-way text merge via `diff3 -m`. Tmpfiles for inputs; output is
+
 /// the merged string (possibly containing conflict markers).
+
 /// True when `text` parses cleanly under the tree-sitter grammar for
+
 /// `path`'s extension. For unknown extensions, returns true (no
+
 /// validation possible). For supported extensions, a parse with any
+
 /// `ERROR` node anywhere in the tree returns false — a signal that
+
 /// text-merge fallback produced syntactically broken output and the
+
 /// file should be flagged as a conflict instead of silently shipped.
+
 /// 3-way text merge via `diff3 -m`. Tmpfiles for inputs; output is
+
 /// the merged string (possibly containing conflict markers).
+
 fn diff3_merge_strings(ours: &str, base: &str, theirs: &str) -> Result<String> {
     let dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -1704,19 +1864,33 @@ fn parses_cleanly(path: &Path, text: &str) -> bool {
 }
 
 /// merge-base), run `merge_trees_and_ops`, then write the requested
+
 /// file's merged content back to `ours_path` and the merged op-log back
+
 /// to `.llm-edit/log.jsonl` inside the working tree. The whole-tree
+
 /// merge is what makes cross-file rewrites (class renames that touch
+
 /// HTML + CSS, project-scoped symbol renames) land correctly.
+
 ///
+
 /// Performance note: each of git's per-file invocations redoes the
+
 /// whole-tree merge. That's wasteful but correct; a deterministic
+
 /// cache keyed on the three SHAs would be the v2 improvement.
+
 ///
+
 /// Exit codes follow git's merge-driver contract:
+
 /// - 0: clean merge; `ours_path` now contains merged content.
+
 /// - 1: conflict; `ours_path` unchanged and a `.llm-edit/conflicts.txt`
+
 ///   is written at the repo root for human attention.
+
 pub fn run_merge_driver(
     _base_path: &Path,
     ours_path: &Path,
@@ -1816,7 +1990,9 @@ fn git_cmd(args: &[&str]) -> Result<String> {
 }
 
 /// Read the first ref from `.git/MERGE_HEAD` during an active merge.
+
 /// Falls back to `git rev-parse MERGE_HEAD` if the file isn't present.
+
 fn read_merge_head() -> Result<String> {
     let git_dir = git_cmd(&["rev-parse", "--git-dir"])?;
     let mh = PathBuf::from(git_dir.trim()).join("MERGE_HEAD");
@@ -1834,6 +2010,7 @@ fn repo_root() -> Result<PathBuf> {
 }
 
 /// Extract every file at a given git ref into an in-memory Tree.
+
 fn git_extract_tree(sha: &str) -> Result<Tree> {
     let listing = git_cmd(&["ls-tree", "-r", "--name-only", sha])?;
     let mut tree = Tree::new();
@@ -1864,12 +2041,19 @@ fn append_op_to_log(cwd: &Path, op_json: &str) -> Result<()> {
 }
 
 /// Record a `delete_node` op that targets a comment identified by
+
 /// content-hash (not positional index). Computes a stable `node_id` from
+
 /// `(fn_name, normalized comment text)`, persists it to
+
 /// `.llm-edit/nodes.json` as the registry, emits an op carrying the
+
 /// `node_id` plus the inline text the applier needs, and applies the
+
 /// delete. Survives concurrent inserts of sibling comments that would
+
 /// drift a positional `{kind: "comment", index: N}` anchor.
+
 pub fn record_delete_comment(
     cwd: &Path,
     file: &str,
@@ -1916,6 +2100,7 @@ pub fn record_delete_comment(
 }
 
 #[cfg(test)]
+
 mod parse_check_tests {
     use super::parses_cleanly;
     use std::path::Path;
