@@ -1131,15 +1131,10 @@ fn git_merge_ast_resolves_disjoint_rust_function_edits() {
 }
 
 /// Recursive AST merge: two branches each add a new method to the same
-
 /// `impl` block. Whole-item diff3 would conflict on the line just
-
 /// before the closing `}`; recursive merge sees them as separate
-
 /// sub-items and keeps both.
-
 #[test]
-
 fn git_merge_ast_recurses_into_impl_block_method_adds() {
     let dir = tempdir().unwrap();
     let repo = dir.path();
@@ -1178,4 +1173,58 @@ fn git_merge_ast_recurses_into_impl_block_method_adds() {
     for needed in &["fn a(&self)", "fn b(&self)", "fn c(&self)", "fn d(&self)"] {
         assert!(merged.contains(needed), "missing method {}:\n{}", needed, merged);
     }
+}
+
+/// Regression: AST merge must preserve original whitespace between
+/// adjacent items. Earlier `merge_items` joined every emitted item
+/// with `\n\n`, which inserted spurious blank lines between adjacent
+/// doc-comment lines (each `//!` is a separate top-level
+/// `line_comment` AST node) and adjacent `use` statements. This
+/// silently corrupted every dogfood-merged Rust source file.
+#[test]
+fn git_merge_ast_preserves_adjacent_doc_comment_and_use_spacing() {
+    let dir = tempdir().unwrap();
+    let repo = dir.path();
+
+    run("git", &["init", "-q", "--initial-branch=main"], repo);
+    run("git", &["config", "user.email", "test@test"], repo);
+    run("git", &["config", "user.name", "test"], repo);
+
+    let base = "//! Doc line 1\n//! Doc line 2\n//! Doc line 3\n\nuse std::path::Path;\nuse std::collections::BTreeMap;\n\nfn alpha() -> i32 { 1 }\nfn beta() -> i32 { 2 }\n";
+    fs::write(repo.join("lib.rs"), base).unwrap();
+    fs::create_dir_all(repo.join(".llm-edit")).unwrap();
+    fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "base"], repo);
+
+    run("git", &["checkout", "-b", "theirs", "-q"], repo);
+    let theirs = "//! Doc line 1\n//! Doc line 2\n//! Doc line 3\n\nuse std::path::Path;\nuse std::collections::BTreeMap;\n\nfn alpha() -> i32 { 1 }\nfn beta() -> i32 { 2 }\n\nfn gamma() -> i32 { 3 }\n";
+    fs::write(repo.join("lib.rs"), theirs).unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "theirs: add gamma"], repo);
+
+    run("git", &["checkout", "main", "-q"], repo);
+    let ours = "//! Doc line 1\n//! Doc line 2\n//! Doc line 3\n\nuse std::path::Path;\nuse std::collections::BTreeMap;\n\nfn alpha() -> i32 { 11 }\nfn beta() -> i32 { 2 }\n";
+    fs::write(repo.join("lib.rs"), ours).unwrap();
+    run("git", &["add", "."], repo);
+    run("git", &["commit", "-q", "-m", "ours: edit alpha"], repo);
+
+    run_llm_edit(&["git-merge", "theirs"], repo);
+
+    let merged = fs::read_to_string(repo.join("lib.rs")).unwrap();
+    // Adjacent doc comments must NOT have blank lines between them.
+    assert!(
+        merged.contains("//! Doc line 1\n//! Doc line 2\n//! Doc line 3\n"),
+        "doc comments got blank lines inserted:\n{}",
+        merged
+    );
+    // Adjacent use statements must NOT have blank lines between them.
+    assert!(
+        merged.contains("use std::path::Path;\nuse std::collections::BTreeMap;\n"),
+        "use statements got blank lines inserted:\n{}",
+        merged
+    );
+    // Both edits applied.
+    assert!(merged.contains("fn alpha() -> i32 { 11 }"), "alpha edit lost:\n{}", merged);
+    assert!(merged.contains("fn gamma() -> i32 { 3 }"), "gamma add lost:\n{}", merged);
 }

@@ -1,39 +1,33 @@
 //! AST-aware 3-way merge for supported languages. Instead of line-level
-
 //! diff3, parse all three versions (base, ours, theirs) with tree-sitter,
-
 //! extract top-level items by name, and merge at the item level. Items
-
 //! that only one side touched → take that side cleanly. Items both sides
-
 //! touched → narrow diff3 to just that item's text (much less likely to
-
 //! collide than whole-file diff3).
-
 //!
-
 //! This directly fixes the "every dogfood merge corrupts src/cli.rs"
-
 //! pattern where diff3 silently drops braces / function declarations when
-
 //! two branches edit different functions in the same large file.
 
 use std::collections::{BTreeMap, BTreeSet};
-
 use std::path::Path;
-
 use std::process::Command;
 
 /// A named top-level item extracted from a source file's AST.
-
 #[derive(Debug, Clone)]
-
 struct Item {
+    /// Whitespace from the previous item's end (or the container's
+    /// opening) up to this item's start. Carried so reassembly can
+    /// concatenate items and reproduce the original separator
+    /// structure (one blank line between functions, no blank lines
+    /// between adjacent doc-comment lines, etc.) instead of
+    /// stamping a hardcoded "\n\n" between every pair.
+    leading: String,
     /// (kind, name) tuple for identity. E.g. ("function_item", "run_git_merge").
     kind: String,
     name: String,
-    /// The full source text of the item (including leading whitespace on
-    /// its first line, trailing newline). Byte-exact from the source.
+    /// The item's source text from `start_byte()` to `end_byte()`,
+    /// without leading or trailing whitespace.
     text: String,
 }
 
@@ -44,7 +38,6 @@ impl Item {
 }
 
 /// Result of an AST-aware 3-way merge.
-
 pub enum AstMergeResult {
     /// Clean merge; the merged text is ready to write.
     Clean(String),
@@ -57,11 +50,8 @@ pub enum AstMergeResult {
 }
 
 /// Try an AST-aware 3-way merge of `base`, `ours`, `theirs` for the
-
 /// file at `path`. Returns `NotApplicable` when the file's language
-
 /// isn't supported or the parse fails.
-
 pub fn ast_merge(path: &Path, base: &str, ours: &str, theirs: &str) -> AstMergeResult {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let lang: tree_sitter::Language = match ext {
@@ -109,30 +99,31 @@ pub fn ast_merge(path: &Path, base: &str, ours: &str, theirs: &str) -> AstMergeR
 }
 
 /// Extract named top-level items from the root node. Items are
-
 /// identified by (kind, name); unnamed nodes (bare expressions,
-
 /// comments between items, module docstrings) are captured as
-
 /// `("__anon__", "__NNN__")` with a sequential index so they
-
 /// participate in ordering but don't match across versions by name.
-
 fn extract_items(root: tree_sitter::Node, source: &[u8], ext: &str) -> Vec<Item> {
     let mut items: Vec<Item> = Vec::new();
     let mut anon_idx = 0usize;
+    let mut prev_end = 0usize;
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
-        let kind = child.kind().to_string();
+        let leading = std::str::from_utf8(&source[prev_end..child.start_byte()])
+            .unwrap_or("")
+            .to_string();
         let text = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
             .unwrap_or("")
             .to_string();
+        prev_end = child.end_byte();
+        let kind = child.kind().to_string();
         let name = item_name(child, source, ext);
         match name {
-            Some(n) => items.push(Item { kind, name: n, text }),
+            Some(n) => items.push(Item { leading, kind, name: n, text }),
             None => {
                 // Anonymous item — assign a positional key.
                 items.push(Item {
+                    leading,
                     kind: "__anon__".to_string(),
                     name: format!("__{anon_idx}__"),
                     text,
@@ -145,7 +136,6 @@ fn extract_items(root: tree_sitter::Node, source: &[u8], ext: &str) -> Vec<Item>
 }
 
 /// Try to extract a name for a top-level AST node.
-
 fn item_name(node: tree_sitter::Node, source: &[u8], ext: &str) -> Option<String> {
     // Common pattern: node has a `name` field.
     if let Some(name_node) = node.child_by_field_name("name") {
@@ -223,40 +213,38 @@ fn node_text_raw(node: tree_sitter::Node, source: &[u8]) -> String {
         .to_string()
 }
 
-/// 3-way merge at item granularity.
-
+/// 3-way merge at item granularity. Each emitted item carries its
+/// original leading whitespace (captured at extract time) so the
+/// output reproduces the source's separator structure between items
+/// — adjacent doc-comment lines stay tight, adjacent functions keep
+/// their blank line, etc. Hardcoded separators would corrupt the
+/// former case.
 fn merge_items(base: &[Item], ours: &[Item], theirs: &[Item], ext: &str) -> AstMergeResult {
-    let base_map: BTreeMap<(String, String), &str> =
-        base.iter().map(|i| (i.key(), i.text.as_str())).collect();
-    let ours_map: BTreeMap<(String, String), &str> =
-        ours.iter().map(|i| (i.key(), i.text.as_str())).collect();
-    let theirs_map: BTreeMap<(String, String), &str> =
-        theirs.iter().map(|i| (i.key(), i.text.as_str())).collect();
+    let base_map: BTreeMap<(String, String), &Item> =
+        base.iter().map(|i| (i.key(), i)).collect();
+    let ours_map: BTreeMap<(String, String), &Item> =
+        ours.iter().map(|i| (i.key(), i)).collect();
+    let theirs_map: BTreeMap<(String, String), &Item> =
+        theirs.iter().map(|i| (i.key(), i)).collect();
 
     // Determine the union of all item keys, ordered by their position
-    // in `ours` first, then any theirs-only items appended at the
-    // position they'd appear relative to shared neighbors.
+    // in `ours` first, then any theirs-only items appended at the end.
     let mut order: Vec<(String, String)> = Vec::new();
     let ours_keys: Vec<(String, String)> = ours.iter().map(|i| i.key()).collect();
     let theirs_keys: Vec<(String, String)> = theirs.iter().map(|i| i.key()).collect();
     let ours_set: BTreeSet<(String, String)> = ours_keys.iter().cloned().collect();
-
-    // Start with ours's order.
     for key in &ours_keys {
         order.push(key.clone());
     }
-    // Append theirs-only items at the end (simple; positional
-    // interleaving is possible but complex and rarely needed).
     for key in &theirs_keys {
         if !ours_set.contains(key) {
             order.push(key.clone());
         }
     }
-    // Deduplicate (anonymous items with same key in both sides).
     let mut seen = BTreeSet::new();
     order.retain(|k| seen.insert(k.clone()));
 
-    let mut merged_parts: Vec<String> = Vec::new();
+    let mut output = String::new();
     let mut has_conflict = false;
 
     for key in &order {
@@ -264,49 +252,37 @@ fn merge_items(base: &[Item], ours: &[Item], theirs: &[Item], ext: &str) -> AstM
         let in_ours = ours_map.get(key).copied();
         let in_theirs = theirs_map.get(key).copied();
 
-        let merged_text = match (in_base, in_ours, in_theirs) {
+        // Decide: which side's leading whitespace, and what content.
+        let (leading_src, content): (&str, String) = match (in_base, in_ours, in_theirs) {
             // Only in ours (added by ours, or deleted by theirs).
-            (None, Some(o), None) => o.to_string(),
-            (Some(_), Some(o), None) => {
-                // In base + ours but theirs deleted it. Take theirs's
-                // decision (delete). Skip this item.
-                let _ = o;
-                continue;
-            }
+            (None, Some(o), None) => (o.leading.as_str(), o.text.clone()),
+            (Some(_), Some(_), None) => continue, // theirs deleted; skip
             // Only in theirs (added by theirs, or deleted by ours).
-            (None, None, Some(t)) => t.to_string(),
-            (Some(_), None, Some(_)) => {
-                // In base + theirs but ours deleted it. Skip.
-                continue;
-            }
-            // In base only (both deleted). Skip.
+            (None, None, Some(t)) => (t.leading.as_str(), t.text.clone()),
+            (Some(_), None, Some(_)) => continue, // ours deleted; skip
             (Some(_), None, None) => continue,
-            // Not in any (shouldn't happen). Skip.
             (None, None, None) => continue,
-            // In all three.
             (Some(b), Some(o), Some(t)) => {
-                if o == t {
-                    // Both sides agree (or neither changed).
-                    o.to_string()
-                } else if o == b {
+                let content = if o.text == t.text {
+                    o.text.clone()
+                } else if o.text == b.text {
                     // Only theirs changed.
-                    t.to_string()
-                } else if t == b {
+                    t.text.clone()
+                } else if t.text == b.text {
                     // Only ours changed.
-                    o.to_string()
+                    o.text.clone()
                 } else {
                     // Both changed differently. Try recursive AST merge
                     // first (e.g. two branches add different methods to
-                    // the same impl block); fall back to diff3 if the
-                    // item has no named-children container.
-                    match merge_changed_item_recursive(o, b, t, ext) {
+                    // the same impl block); fall back to diff3.
+                    match merge_changed_item_recursive(&o.text, &b.text, &t.text, ext) {
                         Some((merged, conflicted)) => {
                             if conflicted {
                                 has_conflict = true;
                             }
                             merged
                         }
-                        None => match diff3_item(o, b, t) {
+                        None => match diff3_item(&o.text, &b.text, &t.text) {
                             Ok(merged) => {
                                 if merged.lines().any(|l| l.starts_with("<<<<<<<")) {
                                     has_conflict = true;
@@ -317,41 +293,38 @@ fn merge_items(base: &[Item], ours: &[Item], theirs: &[Item], ext: &str) -> AstM
                                 has_conflict = true;
                                 format!(
                                     "<<<<<<< ours\n{}\n=======\n{}\n>>>>>>> theirs\n",
-                                    o, t
+                                    o.text, t.text
                                 )
                             }
                         },
                     }
-                }
+                };
+                (o.leading.as_str(), content)
             }
-            // New on both sides — convergent or divergent.
             (None, Some(o), Some(t)) => {
-                if o == t {
-                    o.to_string()
+                let content = if o.text == t.text {
+                    o.text.clone()
                 } else {
-                    // Both sides added an item with the same key but
-                    // different content. Conflict.
                     has_conflict = true;
                     format!(
                         "<<<<<<< ours\n{}\n=======\n{}\n>>>>>>> theirs\n",
-                        o, t
+                        o.text, t.text
                     )
-                }
+                };
+                (o.leading.as_str(), content)
             }
         };
-        merged_parts.push(merged_text);
+
+        // Each item carries its captured leading (whitespace from the
+        // previous item's end). The first emitted item's leading is
+        // whatever sat at the start of the source (often empty).
+        output.push_str(leading_src);
+        output.push_str(&content);
     }
 
-    // Reassemble with double-newline separators (common convention).
-    // Trim trailing whitespace from each part to normalize, then rejoin.
-    let mut output = String::new();
-    for (i, part) in merged_parts.iter().enumerate() {
-        if i > 0 {
-            output.push_str("\n\n");
-        }
-        output.push_str(part.trim_end());
-    }
-    if !output.ends_with('\n') {
+    // Trailing newline: most files end with a single newline. If the
+    // last item's text already ends in one, leave it; otherwise add one.
+    if !output.is_empty() && !output.ends_with('\n') {
         output.push('\n');
     }
 
@@ -363,13 +336,9 @@ fn merge_items(base: &[Item], ours: &[Item], theirs: &[Item], ext: &str) -> AstM
 }
 
 /// Run diff3 on a single item's text. Uses tmpfiles like the
-
 /// whole-file diff3 path. Inputs are newline-normalized (diff3 on
-
 /// macOS errors with "logic error" on files without trailing
-
 /// newlines; tree-sitter node spans often omit them).
-
 fn diff3_item(ours: &str, base: &str, theirs: &str) -> Result<String, String> {
     let ensure_nl = |s: &str| -> String {
         if s.ends_with('\n') { s.to_string() } else { format!("{}\n", s) }
@@ -401,25 +370,15 @@ fn diff3_item(ours: &str, base: &str, theirs: &str) -> Result<String, String> {
 }
 
 /// Try to merge an item that both sides changed by recursing into its
-
 /// named-children container (e.g. an impl block's method list, a
-
 /// class body). Returns `Some((merged_text, has_conflict))` on success;
-
 /// `None` when the item has no recognizable inner container, in which
-
 /// case the caller should fall back to whole-item diff3.
-
 ///
-
 /// Limited to containers whose children don't need separators between
-
 /// them (Rust `impl_item` / `mod_item`, Python class body, JS/TS class
-
 /// body). Struct/enum support would need separator-aware reassembly
-
 /// and is left for follow-up.
-
 fn merge_changed_item_recursive(
     ours: &str,
     base: &str,
@@ -459,9 +418,9 @@ fn merge_changed_item_recursive(
     let body_b = inner_container(item_b, ext)?;
     let body_t = inner_container(item_t, ext)?;
 
-    let sub_o = extract_subitems(body_o, ours.as_bytes(), ext);
-    let sub_b = extract_subitems(body_b, base.as_bytes(), ext);
-    let sub_t = extract_subitems(body_t, theirs.as_bytes(), ext);
+    let (sub_o, trail_o) = extract_subitems(body_o, ours.as_bytes(), ext);
+    let (sub_b, _) = extract_subitems(body_b, base.as_bytes(), ext);
+    let (sub_t, _) = extract_subitems(body_t, theirs.as_bytes(), ext);
 
     // No named children means no benefit from recursion.
     let has_named = sub_o.iter().any(|i| i.kind != "__anon__")
@@ -478,31 +437,33 @@ fn merge_changed_item_recursive(
     };
 
     // Splice merged inner content into ours's frame: keep everything up
-    // to and including the body's opening brace, replace the inner with
-    // the merged subs, keep the closing brace and anything after.
+    // to and including the body's opening brace, then the merged subs
+    // (their leading whitespace already includes the post-brace newline +
+    // indentation), then ours's trailing whitespace before `}`, then `}`
+    // and anything after.
     let body_start = body_o.start_byte();
     let body_end = body_o.end_byte();
     if body_end == 0 || body_end <= body_start {
         return None;
     }
     let prefix = &ours[..body_start + 1]; // include `{`
-    let suffix = &ours[body_end - 1..]; // include `}`
-    // Trim trailing newlines from merged subs (we control the suffix
-    // separator), but preserve leading whitespace — the first sub-item
-    // carries its own indentation.
-    let middle = format!("\n{}\n", merged_subs_text.trim_end());
+    let suffix = &ours[body_end - 1..]; // start at `}`
+    // merged_subs_text from merge_items ends with a single trailing
+    // newline; strip it so trail_o (which is whatever ours had between
+    // the last sub-item and `}`) governs.
+    let middle = format!(
+        "{}{}",
+        merged_subs_text.strip_suffix('\n').unwrap_or(&merged_subs_text),
+        trail_o
+    );
 
     Some((format!("{}{}{}", prefix, middle, suffix), has_conflict))
 }
 
 /// Find the named-children container body of a top-level item, if any.
-
 /// Only returns containers wrapped in `{` and `}` so the splice in
-
 /// `merge_changed_item_recursive` is uniform. Python class bodies have
-
 /// no braces and need indent-aware splicing — left for follow-up.
-
 fn inner_container<'a>(item: tree_sitter::Node<'a>, ext: &str) -> Option<tree_sitter::Node<'a>> {
     match ext {
         "rs" => match item.kind() {
@@ -518,36 +479,44 @@ fn inner_container<'a>(item: tree_sitter::Node<'a>, ext: &str) -> Option<tree_si
 }
 
 /// Walk the children of a container node (impl body, class body, etc.)
-
 /// and extract sub-items in the same shape as `extract_items`. Skips
-
 /// structural delimiter tokens (braces, colons, indents) so the merge
-
-/// reassembly doesn't double-stamp them.
-
-fn extract_subitems(body: tree_sitter::Node, source: &[u8], ext: &str) -> Vec<Item> {
+/// reassembly doesn't double-stamp them. Returns the items plus the
+/// trailing whitespace between the last item and the closing brace
+/// (used by the splice to preserve indentation around `}`).
+fn extract_subitems(
+    body: tree_sitter::Node,
+    source: &[u8],
+    ext: &str,
+) -> (Vec<Item>, String) {
     let mut items: Vec<Item> = Vec::new();
     let mut anon_idx = 0usize;
+    // Start position right after the body's opening `{`.
+    let mut prev_end = body.start_byte() + 1;
+    let body_close = body.end_byte().saturating_sub(1); // position of `}`
     let mut cursor = body.walk();
     for child in body.children(&mut cursor) {
-        // Skip structural tokens that the splice will re-emit.
+        // Skip structural tokens; their bytes are accounted for by the
+        // splice's prefix/suffix.
         match child.kind() {
             "{" | "}" | "(" | ")" | ":" | ";" => continue,
+            "indent" | "dedent" | "newline" => continue,
             _ => {}
         }
-        // Skip pure-whitespace nodes (tree-sitter-python emits an
-        // implicit indent/dedent that would otherwise look like an
-        // anonymous item).
-        if child.kind() == "indent" || child.kind() == "dedent" || child.kind() == "newline" {
-            continue;
-        }
-        let text = capture_text_with_indent(child, source);
+        let leading = std::str::from_utf8(&source[prev_end..child.start_byte()])
+            .unwrap_or("")
+            .to_string();
+        let text = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+            .unwrap_or("")
+            .to_string();
+        prev_end = child.end_byte();
         let kind = child.kind().to_string();
         let name = item_name(child, source, ext);
         match name {
-            Some(n) => items.push(Item { kind, name: n, text }),
+            Some(n) => items.push(Item { leading, kind, name: n, text }),
             None => {
                 items.push(Item {
+                    leading,
                     kind: "__anon__".to_string(),
                     name: format!("__{anon_idx}__"),
                     text,
@@ -556,22 +525,12 @@ fn extract_subitems(body: tree_sitter::Node, source: &[u8], ext: &str) -> Vec<It
             }
         }
     }
-    items
-}
-
-/// Capture a node's text including any leading spaces/tabs on its own
-
-/// line (so reassembly preserves indentation without extra bookkeeping).
-
-fn capture_text_with_indent(node: tree_sitter::Node, source: &[u8]) -> String {
-    let mut start = node.start_byte();
-    while start > 0 {
-        let b = source[start - 1];
-        if b == b' ' || b == b'\t' {
-            start -= 1;
-        } else {
-            break;
-        }
-    }
-    String::from_utf8_lossy(&source[start..node.end_byte()]).to_string()
+    let trailing = if prev_end <= body_close {
+        std::str::from_utf8(&source[prev_end..body_close])
+            .unwrap_or("")
+            .to_string()
+    } else {
+        String::new()
+    };
+    (items, trailing)
 }
