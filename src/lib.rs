@@ -241,6 +241,32 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
             *text = insert_line_after_matching(text, needle, content)?;
             Ok(())
         }
+        Op::AddFile { file, content } => {
+            let path = PathBuf::from(file);
+            if tree.contains_key(&path) {
+                return Err(anyhow!("add_file: {} already exists", file));
+            }
+            tree.insert(path, content.clone());
+            Ok(())
+        }
+        Op::DeleteFile { file } => {
+            let path = PathBuf::from(file);
+            if tree.remove(&path).is_none() {
+                return Err(anyhow!("delete_file: {} not found", file));
+            }
+            Ok(())
+        }
+        Op::MoveFile { from, to } => {
+            let from_path = PathBuf::from(from);
+            let to_path = PathBuf::from(to);
+            let content = tree.remove(&from_path)
+                .ok_or_else(|| anyhow!("move_file: {} not found", from))?;
+            if tree.contains_key(&to_path) {
+                return Err(anyhow!("move_file: target {} already exists", to));
+            }
+            tree.insert(to_path, content);
+            Ok(())
+        }
     }
 }
 

@@ -67,6 +67,9 @@ pub enum ConflictReport {
         file: String,
         symbol: String,
     },
+    AddFileMismatch {
+        file: String,
+    },
 }
 
 pub enum MergeResult {
@@ -484,6 +487,19 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
             };
             Ok(import_block_is_sorted(text))
         }
+        Op::AddFile { file, content } => {
+            let path = PathBuf::from(file);
+            match tree.get(&path) {
+                Some(existing) => Ok(existing == content),
+                None => Ok(false),
+            }
+        }
+        Op::DeleteFile { file } => {
+            Ok(!tree.contains_key(&PathBuf::from(file)))
+        }
+        Op::MoveFile { from, to } => {
+            Ok(!tree.contains_key(&PathBuf::from(from)) && tree.contains_key(&PathBuf::from(to)))
+        }
         _ => Ok(false),
     }
 }
@@ -864,6 +880,56 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
         };
     check_rename_vs_delete(ops_a, ops_b, &mut out);
     check_rename_vs_delete(ops_b, ops_a, &mut out);
+
+    // add_file on the same path with different content.
+    for a in ops_a {
+        if let Op::AddFile { file: a_file, content: a_content } = a {
+            for b in ops_b {
+                if let Op::AddFile { file: b_file, content: b_content } = b {
+                    if a_file == b_file && a_content != b_content {
+                        out.push(ConflictReport::AddFileMismatch {
+                            file: a_file.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // delete_file vs any op targeting the same file on the other side.
+    let check_delete_file_vs_ops =
+        |del_ops: &[Op], other_ops: &[Op], out: &mut Vec<ConflictReport>| {
+            for a in del_ops {
+                if let Op::DeleteFile { file: del_file } = a {
+                    for b in other_ops {
+                        let touches = match b {
+                            Op::AddFile { file, .. } => file == del_file,
+                            Op::DeleteFile { file } => file == del_file,
+                            Op::MoveFile { from, .. } => from == del_file,
+                            Op::RenameSymbol { file, .. } => file == del_file,
+                            Op::AddFunction { anchor, .. }
+                            | Op::DeleteFunction { anchor }
+                            | Op::ReplaceInAnchor { anchor, .. }
+                            | Op::InsertAfter { anchor, .. }
+                            | Op::DeleteNode { anchor }
+                            | Op::ExtractFunction { source: anchor, .. } => {
+                                anchor.get("file").and_then(|v| v.as_str()) == Some(del_file)
+                            }
+                            _ => false,
+                        };
+                        if touches {
+                            out.push(ConflictReport::DeleteVsEdit {
+                                file: del_file.clone(),
+                                entity: format!("file:{}", del_file),
+                            });
+                            break; // one conflict per file is enough
+                        }
+                    }
+                }
+            }
+        };
+    check_delete_file_vs_ops(ops_a, ops_b, &mut out);
+    check_delete_file_vs_ops(ops_b, ops_a, &mut out);
 
     let mut seen = std::collections::HashSet::new();
     out.retain(|c| seen.insert(serde_json::to_string(c).unwrap()));

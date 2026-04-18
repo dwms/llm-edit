@@ -115,6 +115,17 @@ pub enum Op {
     DeleteFunction {
         anchor: Anchor,
     },
+    AddFile {
+        file: String,
+        content: String,
+    },
+    DeleteFile {
+        file: String,
+    },
+    MoveFile {
+        from: String,
+        to: String,
+    },
 }
 
 pub fn parse_log(text: &str) -> anyhow::Result<Vec<Op>> {

@@ -82,6 +82,29 @@ enum Cmd {
         #[arg(long)]
         source: String,
     },
+    /// Create a new file with the given content.
+    #[command(name = "add-file")]
+    AddFile {
+        #[arg(long)]
+        file: String,
+        /// File content (use \n for newlines, or pipe from stdin via --content "$(cat path)").
+        #[arg(long)]
+        content: String,
+    },
+    /// Delete an entire file.
+    #[command(name = "delete-file")]
+    DeleteFile2 {
+        #[arg(long)]
+        file: String,
+    },
+    /// Rename / relocate a file.
+    #[command(name = "move-file")]
+    MoveFile {
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+    },
     /// Delete an entire function from a file.
     #[command(name = "delete-function")]
     DeleteFunction {
@@ -245,6 +268,23 @@ fn main() -> Result<()> {
         | Cmd::Infer
         | Cmd::GitRebase { .. }
         | Cmd::DeleteComment { .. } => unreachable!(),
+        Cmd::AddFile { file, content } => json!({
+            "op": "add_file",
+            "file": file,
+            "content": content,
+        })
+        .to_string(),
+        Cmd::DeleteFile2 { file } => json!({
+            "op": "delete_file",
+            "file": file,
+        })
+        .to_string(),
+        Cmd::MoveFile { from, to } => json!({
+            "op": "move_file",
+            "from": from,
+            "to": to,
+        })
+        .to_string(),
         Cmd::AddFunction { file, after, name, source } => json!({
             "op": "add_function",
             "anchor": { "file": file, "path": ["module"] },

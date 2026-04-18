@@ -125,7 +125,7 @@ pub fn apply_op_json(cwd: &Path, op_json: &str) -> Result<()> {
     let mut tree = load_tree(cwd)?;
     let before = tree.clone();
     apply_log(&mut tree, &[op])?;
-    // Write back only files that changed.
+    // Write back files that changed or were added.
     for (rel, text) in &tree {
         if before.get(rel) != Some(text) {
             let abs = cwd.join(rel);
@@ -134,6 +134,16 @@ pub fn apply_op_json(cwd: &Path, op_json: &str) -> Result<()> {
             }
             std::fs::write(&abs, text)
                 .with_context(|| format!("write {}", abs.display()))?;
+        }
+    }
+    // Delete files that were removed from the tree (delete_file, move_file).
+    for (rel, _) in &before {
+        if !tree.contains_key(rel) {
+            let abs = cwd.join(rel);
+            if abs.exists() {
+                std::fs::remove_file(&abs)
+                    .with_context(|| format!("delete {}", abs.display()))?;
+            }
         }
     }
     // Append to log.
