@@ -300,83 +300,146 @@ fn write_output(output: &Path, tree: &Tree, log: &[Op]) -> Result<()> {
 /// Returns (inferred_count, skipped_count).
 pub fn run_infer() -> Result<(usize, usize)> {
     let repo_root = repo_root()?;
-    let changed = git_cmd(&["diff", "--name-only", "HEAD"])?;
+    // Use --name-status to distinguish Added / Modified / Deleted files.
+    let status_output = git_cmd(&["diff", "--name-status", "HEAD"])?;
     let mut inferred = 0usize;
     let mut skipped = 0usize;
     let mut new_ops: Vec<crate::ops::Op> = Vec::new();
 
-    for line in changed.lines() {
-        let rel = line.trim();
-        if rel.is_empty() {
+    // Read existing pending ops so we can skip files that already have
+    // recorded ops (avoids duplicating ops from e.g. `llm-edit rename-symbol`
+    // that already wrote to log.jsonl before infer runs).
+    let log_path = repo_root.join(".llm-edit/log.jsonl");
+    let pending_text = std::fs::read_to_string(&log_path).unwrap_or_default();
+    let pending_files: std::collections::HashSet<String> = parse_log(&pending_text)?
+        .iter()
+        .filter_map(|op| pending_op_file(op))
+        .collect();
+
+    for line in status_output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
             continue;
         }
-        let path = std::path::PathBuf::from(rel);
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        // Skip files we have no AST for.
-        if !matches!(ext, "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "rs") {
-            skipped += 1;
-            println!("  skip  {}  (no grammar for .{})", rel, ext);
-            continue;
-        }
-        let before = match git_cmd(&["show", &format!("HEAD:{}", rel)]) {
-            Ok(s) => s,
-            Err(_) => {
-                skipped += 1;
-                println!("  skip  {}  (not in HEAD)", rel);
-                continue;
-            }
+        let (status, rel) = match line.split_once('\t') {
+            Some((s, r)) => (s.trim(), r.trim()),
+            None => continue,
         };
-        let after = std::fs::read_to_string(repo_root.join(rel))
-            .with_context(|| format!("read {}", rel))?;
-        if before == after {
+        // Skip files that already have pending ops recorded.
+        if pending_files.contains(rel) {
             continue;
         }
-        // Try rename first — when matched, it explains the entire diff
-        // and we don't need to look for add/delete patterns on top.
-        if let Some((old, new)) = infer_rename_for(ext, &before, &after) {
-            let op = serde_json::json!({
-                "op": "rename_symbol",
-                "scope": "module",
-                "file": rel,
-                "old": old,
-                "new": new,
-                "kinds": ["parameter", "identifier"],
-            });
-            new_ops.push(serde_json::from_value(op)?);
-            inferred += 1;
-            println!("  rename  {}  {} -> {}", rel, old, new);
+        // Skip .llm-edit metadata.
+        if rel.starts_with(".llm-edit") {
             continue;
         }
 
-        // Python-specific patterns. JS/TS/Rust analogues are tracked in
-        // #44; build them per language as need arises.
-        let mut file_inferred = 0usize;
-        if ext == "py" {
-            for op in infer_python_patterns(rel, &before, &after)? {
-                let label = match &op {
-                    serde_json::Value::Object(o) => {
-                        o.get("op").and_then(|v| v.as_str()).unwrap_or("op").to_string()
-                    }
-                    _ => "op".to_string(),
+        match status {
+            "A" => {
+                // New file → add_file op.
+                let content = match std::fs::read_to_string(repo_root.join(rel)) {
+                    Ok(s) => s,
+                    Err(_) => continue, // binary or unreadable
                 };
-                let parsed: crate::ops::Op = serde_json::from_value(op)?;
-                new_ops.push(parsed);
-                file_inferred += 1;
-                println!("  {}  {}", label, rel);
+                let op: Op = serde_json::from_value(serde_json::json!({
+                    "op": "add_file",
+                    "file": rel,
+                    "content": content,
+                }))?;
+                new_ops.push(op);
+                inferred += 1;
+                println!("  add_file  {}", rel);
             }
-        }
-        if file_inferred > 0 {
-            inferred += file_inferred;
-        } else {
-            skipped += 1;
-            println!("  skip  {}  (no pattern detected)", rel);
+            "D" => {
+                // Deleted file → delete_file op.
+                let op: Op = serde_json::from_value(serde_json::json!({
+                    "op": "delete_file",
+                    "file": rel,
+                }))?;
+                new_ops.push(op);
+                inferred += 1;
+                println!("  delete_file  {}", rel);
+            }
+            "M" => {
+                // Modified file — run the existing pattern detectors.
+                let path = std::path::PathBuf::from(rel);
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                if !matches!(ext, "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "rs") {
+                    skipped += 1;
+                    println!("  skip  {}  (no grammar for .{})", rel, ext);
+                    continue;
+                }
+                let before = match git_cmd(&["show", &format!("HEAD:{}", rel)]) {
+                    Ok(s) => s,
+                    Err(_) => { skipped += 1; continue; }
+                };
+                let after = std::fs::read_to_string(repo_root.join(rel))
+                    .with_context(|| format!("read {}", rel))?;
+                if before == after {
+                    continue;
+                }
+                // Try rename first.
+                if let Some((old, new)) = infer_rename_for(ext, &before, &after) {
+                    let op: Op = serde_json::from_value(serde_json::json!({
+                        "op": "rename_symbol",
+                        "scope": "module",
+                        "file": rel,
+                        "old": old,
+                        "new": new,
+                        "kinds": ["parameter", "identifier"],
+                    }))?;
+                    new_ops.push(op);
+                    inferred += 1;
+                    println!("  rename  {}  {} -> {}", rel, old, new);
+                    continue;
+                }
+                // Python-specific patterns.
+                let mut file_inferred = 0usize;
+                if ext == "py" {
+                    for op in infer_python_patterns(rel, &before, &after)? {
+                        let label = match &op {
+                            serde_json::Value::Object(o) => {
+                                o.get("op").and_then(|v| v.as_str()).unwrap_or("op").to_string()
+                            }
+                            _ => "op".to_string(),
+                        };
+                        let parsed: Op = serde_json::from_value(op)?;
+                        new_ops.push(parsed);
+                        file_inferred += 1;
+                        println!("  {}  {}", label, rel);
+                    }
+                }
+                if file_inferred > 0 {
+                    inferred += file_inferred;
+                } else {
+                    skipped += 1;
+                    println!("  skip  {}  (no pattern detected)", rel);
+                }
+            }
+            s if s.starts_with('R') => {
+                // Renamed file (R100, R095, etc.) — git detected a rename.
+                // The line format is "RXXX\told\tnew".
+                if let Some((_old, new_path)) = rel.split_once('\t') {
+                    let from = rel.split('\t').next().unwrap_or("");
+                    let op: Op = serde_json::from_value(serde_json::json!({
+                        "op": "move_file",
+                        "from": from,
+                        "to": new_path,
+                    }))?;
+                    new_ops.push(op);
+                    inferred += 1;
+                    println!("  move_file  {} -> {}", from, new_path);
+                }
+            }
+            _ => {
+                skipped += 1;
+            }
         }
     }
 
     if !new_ops.is_empty() {
         let log_dir = repo_root.join(".llm-edit");
         std::fs::create_dir_all(&log_dir)?;
-        let log_path = log_dir.join("log.jsonl");
         let mut text = std::fs::read_to_string(&log_path).unwrap_or_default();
         if !text.is_empty() && !text.ends_with('\n') {
             text.push('\n');
@@ -389,6 +452,30 @@ pub fn run_infer() -> Result<(usize, usize)> {
     }
 
     Ok((inferred, skipped))
+}
+
+/// Extract the file targeted by an op (for dedup against pending ops).
+fn pending_op_file(op: &Op) -> Option<String> {
+    match op {
+        Op::RenameSymbol { file, .. } => Some(file.clone()),
+        Op::AddFile { file, .. } | Op::DeleteFile { file } => Some(file.clone()),
+        Op::MoveFile { from, .. } => Some(from.clone()),
+        Op::AddFunction { anchor, .. }
+        | Op::DeleteFunction { anchor }
+        | Op::ReplaceInAnchor { anchor, .. }
+        | Op::InsertAfter { anchor, .. }
+        | Op::DeleteNode { anchor }
+        | Op::ExtractFunction { source: anchor, .. }
+        | Op::InsertElement { anchor, .. }
+        | Op::WrapElement { anchor, .. }
+        | Op::AddRule { anchor, .. }
+        | Op::RetypeBinding { anchor, .. }
+        | Op::AddImport { anchor, .. }
+        | Op::SortBlock { anchor, .. } => {
+            anchor.get("file").and_then(|v| v.as_str()).map(|s| s.to_string())
+        }
+        Op::RenameCssClass { .. } => None, // project-scoped, no single file
+    }
 }
 
 /// Return `Some((old, new))` if there is exactly one identifier name
