@@ -420,8 +420,20 @@ pub fn run_infer() -> Result<(usize, usize)> {
                 if file_inferred > 0 {
                     inferred += file_inferred;
                 } else {
-                    skipped += 1;
-                    println!("  skip  {}  (no pattern detected)", rel);
+                    // Catch-all: infer a file-scoped op from the overall
+                    // diff. Uses common-prefix/suffix narrowing to find
+                    // the single changed region. Handles replacements,
+                    // insertions, and deletions.
+                    if let Some(op_val) = infer_file_level_change(rel, &before, &after) {
+                        let label = op_val.get("op").and_then(|v| v.as_str()).unwrap_or("op").to_string();
+                        let parsed: Op = serde_json::from_value(op_val)?;
+                        new_ops.push(parsed);
+                        inferred += 1;
+                        println!("  {} (file)  {}", label, rel);
+                    } else {
+                        skipped += 1;
+                        println!("  skip  {}  (no pattern detected)", rel);
+                    }
                 }
             }
             s if s.starts_with('R') => {
@@ -636,6 +648,52 @@ fn infer_structural_patterns(
     }
 
     Ok(ops)
+}
+
+/// Infer a file-scoped op from a single-region diff between two file
+/// versions. Handles:
+///   - Insertion (old empty, new non-empty) → insert_after anchored on
+///     the last line of the common prefix
+///   - Deletion (old non-empty, new empty) → replace_in_anchor with new=""
+///   - Replacement (both non-empty) → replace_in_anchor
+/// Multi-region diffs (no single contiguous change) return None.
+fn infer_file_level_change(rel: &str, before: &str, after: &str) -> Option<serde_json::Value> {
+    let p = char_common_prefix_len(before, after);
+    let s_max = before.len().min(after.len()) - p;
+    let s = char_common_suffix_len(&before[p..], &after[p..]).min(s_max);
+    let old = &before[p..before.len() - s];
+    let new = &after[p..after.len() - s];
+    if old.is_empty() && new.is_empty() {
+        return None; // identical files
+    }
+    if !old.is_empty() {
+        // Replacement or deletion. old must be unique in before.
+        if before.matches(old).count() != 1 {
+            return None;
+        }
+        return Some(serde_json::json!({
+            "op": "replace_in_anchor",
+            "anchor": { "file": rel },
+            "old": old,
+            "new": new,
+        }));
+    }
+    // Pure insertion (old is empty). Anchor on the last line of the
+    // common prefix so insert_after can place the content.
+    let prefix = &before[..p];
+    let anchor_line = prefix.lines().last().unwrap_or("").trim();
+    if anchor_line.is_empty() {
+        return None; // can't anchor on a blank line
+    }
+    // Verify anchor is unique.
+    if before.lines().filter(|l| l.trim() == anchor_line).count() != 1 {
+        return None;
+    }
+    Some(serde_json::json!({
+        "op": "insert_after",
+        "anchor": { "file": rel, "after_line_contains": anchor_line },
+        "content": new.trim_end(),
+    }))
 }
 
 /// Find the (common-prefix, common-suffix) bracketed substring change

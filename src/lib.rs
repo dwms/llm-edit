@@ -177,9 +177,19 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
                 out.push_str(new);
                 out.push_str(&text[pos + old.len()..]);
                 *text = out;
-            } else {
-                let fn_name = anchor_path_fn_name(anchor)?;
+            } else if let Ok(fn_name) = anchor_path_fn_name(anchor) {
+                // Function-scoped replace.
                 *text = replace_in_fn_body(text, &fn_name, old, new)?;
+            } else {
+                // File-scoped replace (no function in anchor path).
+                let pos = text
+                    .find(old.as_str())
+                    .ok_or_else(|| anyhow!("replace_in_anchor (file-scoped): `{}` not found", old))?;
+                let mut out = String::with_capacity(text.len() + new.len());
+                out.push_str(&text[..pos]);
+                out.push_str(new);
+                out.push_str(&text[pos + old.len()..]);
+                *text = out;
             }
             Ok(())
         }
