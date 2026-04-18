@@ -61,10 +61,70 @@ enum Cmd {
     DeleteComment {
         #[arg(long)]
         file: String,
-        #[arg(long, name = "fn")]
+        #[arg(long = "fn")]
         fn_name: String,
         #[arg(long)]
         text: String,
+    },
+    /// Add a new function after a named sibling in the same module.
+    #[command(name = "add-function")]
+    AddFunction {
+        /// File to insert into.
+        #[arg(long)]
+        file: String,
+        /// Name of the existing function to insert after.
+        #[arg(long)]
+        after: String,
+        /// Name of the new function.
+        #[arg(long)]
+        name: String,
+        /// Full source text of the function to add (use \n for newlines).
+        #[arg(long)]
+        source: String,
+    },
+    /// Delete an entire function from a file.
+    #[command(name = "delete-function")]
+    DeleteFunction {
+        #[arg(long)]
+        file: String,
+        /// Name of the function to delete.
+        #[arg(long = "fn")]
+        fn_name: String,
+    },
+    /// Delete an AST node identified by an anchor (raw JSON).
+    #[command(name = "delete-node")]
+    DeleteNode {
+        /// Anchor JSON, e.g. '{"file":"x.py","path":["module","fn","helper"]}'.
+        #[arg(long)]
+        anchor: String,
+    },
+    /// Replace a substring within an anchored region (function body,
+    /// element, etc.).
+    #[command(name = "replace-in-anchor")]
+    ReplaceInAnchor {
+        #[arg(long)]
+        file: String,
+        /// Name of the function whose body to search.
+        #[arg(long = "fn")]
+        fn_name: String,
+        /// Old text to find.
+        #[arg(long)]
+        old: String,
+        /// New text to substitute.
+        #[arg(long)]
+        new: String,
+    },
+    /// Insert content after the first line matching a needle string.
+    #[command(name = "insert-after")]
+    InsertAfter {
+        #[arg(long)]
+        file: String,
+        /// A substring that uniquely identifies the line to insert after.
+        #[arg(long)]
+        after_line: String,
+        /// Source text to insert (use \n for newlines).
+        #[arg(long)]
+        content: String,
     },
     /// Merge two worktrees on top of a common base, persist merged
     /// source + merged op-log to `--output`. Use this in place of
@@ -185,6 +245,41 @@ fn main() -> Result<()> {
         | Cmd::Infer
         | Cmd::GitRebase { .. }
         | Cmd::DeleteComment { .. } => unreachable!(),
+        Cmd::AddFunction { file, after, name, source } => json!({
+            "op": "add_function",
+            "anchor": { "file": file, "path": ["module"] },
+            "after": { "kind": "function_def", "name": after },
+            "name": name,
+            "source": source,
+        })
+        .to_string(),
+        Cmd::DeleteFunction { file, fn_name } => json!({
+            "op": "delete_function",
+            "anchor": { "file": file, "path": ["module", {"kind": "function_def", "name": fn_name}] },
+        })
+        .to_string(),
+        Cmd::DeleteNode { anchor } => {
+            let anchor_val: serde_json::Value = serde_json::from_str(&anchor)
+                .expect("--anchor must be valid JSON");
+            json!({
+                "op": "delete_node",
+                "anchor": anchor_val,
+            })
+            .to_string()
+        },
+        Cmd::ReplaceInAnchor { file, fn_name, old, new } => json!({
+            "op": "replace_in_anchor",
+            "anchor": { "file": file, "path": ["module", {"kind": "function_def", "name": fn_name}] },
+            "old": old,
+            "new": new,
+        })
+        .to_string(),
+        Cmd::InsertAfter { file, after_line, content } => json!({
+            "op": "insert_after",
+            "anchor": { "file": file, "after_line_contains": after_line },
+            "content": content,
+        })
+        .to_string(),
         Cmd::Apply { json } => json,
         Cmd::RenameSymbol { file, old, new } => json!({
             "op": "rename_symbol",
