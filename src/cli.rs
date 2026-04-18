@@ -393,10 +393,18 @@ pub fn run_infer() -> Result<(usize, usize)> {
                     println!("  rename  {}  {} -> {}", rel, old, new);
                     continue;
                 }
-                // Python-specific patterns.
+                // Structural patterns: add/delete function +
+                // replace_in_anchor. Generic across languages.
+                let fn_kind = match ext {
+                    "py" => "function_definition",
+                    "rs" => "function_item",
+                    "js" | "jsx" | "mjs" | "cjs" => "function_declaration",
+                    "ts" | "tsx" => "function_declaration",
+                    _ => "",
+                };
                 let mut file_inferred = 0usize;
-                if ext == "py" {
-                    for op in infer_python_patterns(rel, &before, &after)? {
+                if !fn_kind.is_empty() {
+                    for op in infer_structural_patterns(rel, ext, &before, &after, fn_kind)? {
                         let label = match &op {
                             serde_json::Value::Object(o) => {
                                 o.get("op").and_then(|v| v.as_str()).unwrap_or("op").to_string()
@@ -494,23 +502,41 @@ fn infer_rename_for(ext: &str, before: &str, after: &str) -> Option<(String, Str
     let old_count = before_idents.iter().filter(|s| s.as_str() == old).count();
     let new_count = after_idents.iter().filter(|s| s.as_str() == new).count();
     if old_count == new_count && old_count > 0 {
+        // Sanity check: does applying the rename to `before` reproduce
+        // `after`? If not, the identifier-set match is a coincidence
+        // (e.g. unrelated function deleted + different function added)
+        // and the rename would be a false positive.
+        let hypothetical = before.replace(old, new);
+        if hypothetical.trim() != after.trim() {
+            return None;
+        }
         Some((old.to_string(), new.to_string()))
     } else {
         None
     }
 }
 
-/// Detect Python-specific add_function / delete_function / add_import
-/// patterns by comparing top-level structure between `before` and
-/// `after`. Each returned JSON value is a fully-formed op ready to
-/// serialize into the log.
-fn infer_python_patterns(
+/// Detect add_function / delete_function / replace_in_anchor patterns
+/// for any supported language by comparing top-level function structure
+/// between `before` and `after`. `fn_kind` is the tree-sitter node
+/// kind for top-level functions (e.g. "function_definition" for Python,
+/// "function_item" for Rust). Also detects Python-specific add_import.
+fn infer_structural_patterns(
     rel: &str,
+    ext: &str,
     before: &str,
     after: &str,
+    fn_kind: &str,
 ) -> Result<Vec<serde_json::Value>> {
     let mut ops: Vec<serde_json::Value> = Vec::new();
-    let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+    let lang: tree_sitter::Language = match ext {
+        "py" => tree_sitter_python::LANGUAGE.into(),
+        "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
+        "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        "rs" => tree_sitter_rust::LANGUAGE.into(),
+        _ => return Ok(ops),
+    };
     let mut parser = tree_sitter::Parser::new();
     if parser.set_language(&lang).is_err() {
         return Ok(ops);
@@ -525,8 +551,8 @@ fn infer_python_patterns(
         return Ok(ops);
     }
 
-    let before_fns = python_top_level_fns(before_tree.root_node(), before.as_bytes());
-    let after_fns = python_top_level_fns(after_tree.root_node(), after.as_bytes());
+    let before_fns = top_level_fns(before_tree.root_node(), before.as_bytes(), fn_kind);
+    let after_fns = top_level_fns(after_tree.root_node(), after.as_bytes(), fn_kind);
 
     use std::collections::{HashMap, HashSet};
     let before_names: HashSet<&str> = before_fns.iter().map(|f| f.name.as_str()).collect();
@@ -545,10 +571,7 @@ fn infer_python_patterns(
         }
     }
 
-    // add_function: in after, missing from before. Need an `after`
-    // anchor — use the previous top-level function in the after-tree.
-    // If the new function is the file's first def, skip emitting (the
-    // op shape requires a sibling-after anchor in this MVP).
+    // add_function: in after, missing from before.
     let after_fn_index: HashMap<&str, usize> =
         after_fns.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)).collect();
     for f in &after_fns {
@@ -557,8 +580,6 @@ fn infer_python_patterns(
         }
         let idx = after_fn_index[f.name.as_str()];
         if idx == 0 {
-            // No preceding sibling def — add_function shape can't anchor.
-            // Skip; merger's text-fallback covers this case.
             continue;
         }
         let prev_name = &after_fns[idx - 1].name;
@@ -571,30 +592,24 @@ fn infer_python_patterns(
         }));
     }
 
-    // add_import: lines in `after`'s top-of-file import block that
-    // weren't in `before`'s. v0 only handles `import X` (not
-    // `from Y import Z` or aliased) — that's what the add_import op
-    // applier supports today.
-    let before_imports: HashSet<String> = python_simple_imports(before).into_iter().collect();
-    for module in python_simple_imports(after) {
-        if !before_imports.contains(&module) {
-            ops.push(serde_json::json!({
-                "op": "add_import",
-                "anchor": {"file": rel},
-                "module": module,
-            }));
+    // Python-specific: add_import detection.
+    if ext == "py" {
+        let before_imports: HashSet<String> = python_simple_imports(before).into_iter().collect();
+        for module in python_simple_imports(after) {
+            if !before_imports.contains(&module) {
+                ops.push(serde_json::json!({
+                    "op": "add_import",
+                    "anchor": {"file": rel},
+                    "module": module,
+                }));
+            }
         }
     }
 
-    // replace_in_anchor: for each function present in BOTH sides with a
-    // different body, see if the diff is a single contiguous substring
-    // change (common-prefix + common-suffix narrowing). When it is AND
-    // the substring is unique within the original body, emit a
-    // replace_in_anchor op. Multi-region body changes fall through —
-    // text-merge fallback handles them.
-    let before_by_name: HashMap<&str, &PyTopFn> =
+    // replace_in_anchor: single-substring body change within a function.
+    let before_by_name: HashMap<&str, &TopFn> =
         before_fns.iter().map(|f| (f.name.as_str(), f)).collect();
-    let after_by_name: HashMap<&str, &PyTopFn> =
+    let after_by_name: HashMap<&str, &TopFn> =
         after_fns.iter().map(|f| (f.name.as_str(), f)).collect();
     for (name, before_fn) in &before_by_name {
         let Some(after_fn) = after_by_name.get(name) else {
@@ -667,7 +682,7 @@ fn char_common_suffix_len(a: &str, b: &str) -> usize {
 }
 
 #[derive(Debug)]
-struct PyTopFn {
+struct TopFn {
     name: String,
     /// Full `def NAME(args):\n    ...` source — what `add_function`'s
     /// `source` field expects.
@@ -677,14 +692,14 @@ struct PyTopFn {
     body: String,
 }
 
-/// Walk the Python module's top-level statements; for each
-/// `function_definition`, capture its name, full source text, and
-/// just the body text.
-fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> {
-    let mut out: Vec<PyTopFn> = Vec::new();
+/// Walk a module's top-level statements; for each node matching
+/// `fn_kind` (e.g. "function_definition" for Python, "function_item"
+/// for Rust), capture its name, full source text, and body text.
+fn top_level_fns(root: tree_sitter::Node, source: &[u8], fn_kind: &str) -> Vec<TopFn> {
+    let mut out: Vec<TopFn> = Vec::new();
     let mut cursor = root.walk();
     for child in root.children(&mut cursor) {
-        if child.kind() != "function_definition" {
+        if child.kind() != fn_kind {
             continue;
         }
         let name_node = match child.child_by_field_name("name") {
@@ -714,7 +729,7 @@ fn python_top_level_fns(root: tree_sitter::Node, source: &[u8]) -> Vec<PyTopFn> 
             },
             None => String::new(),
         };
-        out.push(PyTopFn { name, source: full_source, body });
+        out.push(TopFn { name, source: full_source, body });
     }
     out
 }
