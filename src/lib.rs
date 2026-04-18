@@ -15,20 +15,23 @@ pub type Tree = BTreeMap<PathBuf, String>;
 pub fn load_tree(root: &Path) -> Result<Tree> {
     let mut tree = Tree::new();
     for entry in WalkDir::new(root).into_iter().filter_entry(|e| {
-        // Skip `.git/` and `.llm-edit/` subtrees up front — they contain
-        // binary/opaque content the applier must not touch, and walking
-        // into them on every load makes real-repo invocations crash on
-        // git's packed objects.
         let name = e.file_name().to_string_lossy();
-        name != ".git" && name != ".llm-edit"
+        !SKIP_DIRS.iter().any(|d| name == *d)
     }) {
         let entry = entry?;
         if !entry.file_type().is_file() {
             continue;
         }
         let rel = entry.path().strip_prefix(root)?.to_path_buf();
-        let text = std::fs::read_to_string(entry.path())
-            .with_context(|| format!("read {}", entry.path().display()))?;
+        // Gracefully skip non-UTF-8 files (binaries, images, compiled
+        // artifacts that leaked past the directory skiplist). They can't
+        // participate in text-based ops and erroring on them blocks
+        // dogfood on any repo with even one such file.
+        let text = match std::fs::read_to_string(entry.path()) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => continue,
+            Err(e) => return Err(e).with_context(|| format!("read {}", entry.path().display())),
+        };
         tree.insert(rel, text);
     }
     Ok(tree)
@@ -1357,3 +1360,21 @@ fn replace_in_fn_body(text: &str, fn_name: &str, old: &str, new: &str) -> Result
 
     Ok(before + &rebuilt_body + &after)
 }
+
+/// Directories that are never part of the logical source tree. Skipped
+/// during `load_tree` to avoid reading binary artifacts, build caches,
+/// or VCS internals. Extend this list as more ecosystem conventions
+/// surface; a proper `.gitignore`-aware walk (via the `ignore` crate)
+/// would be the v2 improvement.
+const SKIP_DIRS: &[&str] = &[
+    ".git",
+    ".llm-edit",
+    "target",         // Rust / Cargo
+    "node_modules",   // Node / npm / pnpm
+    "__pycache__",    // Python bytecode
+    ".venv",          // Python virtualenvs
+    "venv",
+    ".tox",
+    "build",          // generic build output
+    "dist",
+];
