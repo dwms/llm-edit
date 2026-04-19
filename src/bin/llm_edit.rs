@@ -10,7 +10,7 @@ use llm_edit::cli::{
     run_merge_driver,
 };
 use serde_json::json;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Parser)]
 #[command(name = "llm-edit", about = "Record structured edits so merges are trivial.")]
@@ -195,6 +195,10 @@ enum Cmd {
         #[arg(long)]
         no_commit: bool,
     },
+    /// Initialize llm-edit in a git repo: create .llm-edit/ directory,
+    /// set up .gitignore, and install git hooks (pre-commit, prepare-
+    /// commit-msg, post-commit, post-merge).
+    Init,
     /// Walk every changed file vs HEAD; for each, try to derive a
     /// structured op from the before/after pair. Currently detects
     /// single-identifier renames in py / js / jsx / mjs / cjs / ts /
@@ -239,6 +243,69 @@ enum Cmd {
     },
 }
 
+fn run_init(cwd: &Path) -> Result<()> {
+    // llm-edit stores ops in git commit message bodies (event-sourced).
+    // The only workspace artifact is a transient scratch file that the
+    // hooks create on demand. `init` just installs the hooks and adds
+    // the scratch file to .gitignore.
+
+    // 1. Add .llm-edit/log.jsonl to .gitignore.
+    let gitignore = cwd.join(".gitignore");
+    let gitignore_content = std::fs::read_to_string(&gitignore).unwrap_or_default();
+    let entries = [".llm-edit/log.jsonl", ".llm-edit/conflicts.txt"];
+    let mut content = gitignore_content.clone();
+    let mut added_any = false;
+    for entry in &entries {
+        if !content.lines().any(|l| l.trim() == *entry) {
+            if !content.is_empty() && !content.ends_with('\n') {
+                content.push('\n');
+            }
+            content.push_str(entry);
+            content.push('\n');
+            added_any = true;
+        }
+    }
+    if added_any {
+        std::fs::write(&gitignore, content)?;
+        println!("  updated .gitignore");
+    }
+
+    // 2. Install git hooks. The hooks are self-contained shell scripts
+    //    that call `llm-edit` (must be on PATH or LLM_EDIT_BIN set).
+    let git_hooks = cwd.join(".git/hooks");
+    if !git_hooks.is_dir() {
+        return Err(anyhow::anyhow!("not a git repo (no .git/hooks/). Run from a git working tree."));
+    }
+    write_hook(&git_hooks, "pre-commit", include_str!("../../hooks/pre-commit"))?;
+    write_hook(&git_hooks, "prepare-commit-msg", include_str!("../../hooks/prepare-commit-msg"))?;
+    write_hook(&git_hooks, "post-commit", include_str!("../../hooks/post-commit"))?;
+    write_hook(&git_hooks, "post-merge", include_str!("../../hooks/post-merge"))?;
+    println!("  installed git hooks");
+
+    // 3. Create the scratch directory (hooks expect it to exist).
+    std::fs::create_dir_all(cwd.join(".llm-edit"))?;
+
+    println!("\nllm-edit initialized. Usage:");
+    println!("  llm-edit rename-symbol --file src/foo.rs old_name new_name");
+    println!("  llm-edit add-file --file src/new.rs --content '...'");
+    println!("  git commit    # hooks auto-infer ops + embed in commit body");
+    println!("  llm-edit git-merge feature-branch   # semantic merge");
+    Ok(())
+}
+
+fn write_hook(hooks_dir: &Path, name: &str, content: &str) -> Result<()> {
+    let path = hooks_dir.join(name);
+    std::fs::write(&path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms)?;
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let cwd = args
@@ -256,6 +323,9 @@ fn main() -> Result<()> {
         Cmd::MergeDriver { base, ours, theirs, path } => {
             let code = run_merge_driver(&base, &ours, &theirs, &path)?;
             std::process::exit(code);
+        }
+        Cmd::Init => {
+            return run_init(&cwd);
         }
         Cmd::Infer => {
             let (inferred, skipped) = run_infer()?;
@@ -286,7 +356,8 @@ fn main() -> Result<()> {
         | Cmd::MergeDriver { .. }
         | Cmd::Infer
         | Cmd::GitRebase { .. }
-        | Cmd::DeleteComment { .. } => unreachable!(),
+        | Cmd::DeleteComment { .. }
+        | Cmd::Init => unreachable!(),
         Cmd::AddFile { file, content } => json!({
             "op": "add_file",
             "file": file,
