@@ -1,2 +1,3 @@
 /target/
 .llm-edit/conflicts.txt
+.llm-edit/log.jsonl

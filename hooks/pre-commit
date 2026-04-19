@@ -55,7 +55,8 @@ if "$LLM_BIN" infer >/dev/null 2>&1; then
     POST_LOG_HASH="$(shasum "$REPO_ROOT/.llm-edit/log.jsonl" | awk '{print $1}')"
   fi
   if [[ "$PRE_LOG_HASH" != "$POST_LOG_HASH" ]]; then
-    git add "$REPO_ROOT/.llm-edit/log.jsonl"
-    echo "pre-commit: backfilled op(s) into .llm-edit/log.jsonl (auto-staged)." >&2
+    echo "pre-commit: backfilled op(s) into .llm-edit/log.jsonl." >&2
+    # Don't stage log.jsonl — it's a transient working-tree file.
+    # prepare-commit-msg reads it and moves ops into the commit body.
   fi
 fi
