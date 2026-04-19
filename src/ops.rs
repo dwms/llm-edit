@@ -149,3 +149,8 @@ pub fn parse_log(text: &str) -> anyhow::Result<Vec<Op>> {
     }
     Ok(ops)
 }
+
+/// Count ops in a JSONL string.
+pub fn ops_count(text: &str) -> usize {
+    parse_log(text).map(|v| v.len()).unwrap_or(0)
+}
