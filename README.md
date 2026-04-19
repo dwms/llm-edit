@@ -24,8 +24,11 @@ For edits without recorded ops, llm-edit falls back to AST-aware 3-way merge (sp
 ## Install
 
 ```bash
-# Build from source (requires Rust toolchain)
-cargo install --git https://github.com/dwms/llm-edit.git
+# Clone and build (requires Rust toolchain)
+git clone git@github.com:dwms/llm-edit.git
+cd llm-edit
+cargo build --release
+cp target/release/llm-edit /usr/local/bin/
 
 # Initialize in your project
 cd your-project
