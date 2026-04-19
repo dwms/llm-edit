@@ -62,6 +62,7 @@ pub fn ast_merge(path: &Path, base: &str, ours: &str, theirs: &str) -> AstMergeR
         "rs" => tree_sitter_rust::LANGUAGE.into(),
         "css" => tree_sitter_css::LANGUAGE.into(),
         "html" | "htm" => tree_sitter_html::LANGUAGE.into(),
+        "toml" => tree_sitter_toml_ng::LANGUAGE.into(),
         _ => return AstMergeResult::NotApplicable,
     };
 
@@ -87,9 +88,21 @@ pub fn ast_merge(path: &Path, base: &str, ours: &str, theirs: &str) -> AstMergeR
         return AstMergeResult::NotApplicable;
     }
 
-    let base_items = extract_items(base_tree.root_node(), base.as_bytes(), ext);
-    let ours_items = extract_items(ours_tree.root_node(), ours.as_bytes(), ext);
-    let theirs_items = extract_items(theirs_tree.root_node(), theirs.as_bytes(), ext);
+    let base_items = if ext == "toml" {
+        extract_items_toml(base_tree.root_node(), base.as_bytes())
+    } else {
+        extract_items(base_tree.root_node(), base.as_bytes(), ext)
+    };
+    let ours_items = if ext == "toml" {
+        extract_items_toml(ours_tree.root_node(), ours.as_bytes())
+    } else {
+        extract_items(ours_tree.root_node(), ours.as_bytes(), ext)
+    };
+    let theirs_items = if ext == "toml" {
+        extract_items_toml(theirs_tree.root_node(), theirs.as_bytes())
+    } else {
+        extract_items(theirs_tree.root_node(), theirs.as_bytes(), ext)
+    };
 
     // If no named items in any version, the file is probably not
     // structured enough for item-level merge.
@@ -154,6 +167,107 @@ fn extract_items(root: tree_sitter::Node, source: &[u8], ext: &str) -> Vec<Item>
     items
 }
 
+/// TOML-specific extractor: flattens tables into qualified pairs so
+/// two branches adding different deps to `[dependencies]` produce
+/// differently-named items that merge cleanly. Each pair gets a name
+/// like `[dependencies]::anyhow`. Table headers themselves are also
+/// emitted as items so structural changes (new table) are tracked.
+fn extract_items_toml(root: tree_sitter::Node, source: &[u8]) -> Vec<Item> {
+    let mut items: Vec<Item> = Vec::new();
+    let mut prev_end = 0usize;
+    let mut cursor = root.walk();
+    for child in root.children(&mut cursor) {
+        match child.kind() {
+            "table" | "table_array_element" => {
+                // Get the table's header text (first line) for qualification.
+                let header = node_text_raw(child, source)
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                // Walk the table's children: extract each pair with a
+                // qualified name.
+                let mut inner_prev = prev_end;
+                let mut tc = child.walk();
+                for tch in child.children(&mut tc) {
+                    // Identify pair children by their kind.
+                    if tch.kind() == "pair" {
+                        let key = {
+                            let mut kc = tch.walk();
+                            tch.children(&mut kc)
+                                .find(|c| matches!(c.kind(), "bare_key" | "dotted_key" | "key" | "quoted_key"))
+                                .map(|k| node_text_raw(k, source).trim().to_string())
+                                .unwrap_or_default()
+                        };
+                        let leading = std::str::from_utf8(&source[inner_prev..tch.start_byte()])
+                            .unwrap_or("")
+                            .to_string();
+                        let text = std::str::from_utf8(&source[tch.start_byte()..tch.end_byte()])
+                            .unwrap_or("")
+                            .to_string();
+                        inner_prev = tch.end_byte();
+                        let qualified = format!("{}::{}", header, key);
+                        items.push(Item {
+                            leading,
+                            kind: "pair".to_string(),
+                            name: qualified,
+                            text,
+                        });
+                    } else if !matches!(tch.kind(), "comment") {
+                        // Non-pair, non-comment children (brackets, key
+                        // in header) — bytes absorbed into next pair's leading.
+                    }
+                }
+                // Use inner_prev (not child.end_byte()) so trailing
+                // whitespace between this table and the next one becomes
+                // part of the next item's leading instead of being lost.
+                prev_end = inner_prev;
+            }
+            "pair" => {
+                // Root-level pair (before any table header).
+                let key = {
+                    let mut kc = child.walk();
+                    child.children(&mut kc)
+                        .find(|c| matches!(c.kind(), "bare_key" | "dotted_key" | "key" | "quoted_key"))
+                        .map(|k| node_text_raw(k, source).trim().to_string())
+                        .unwrap_or_default()
+                };
+                let leading = std::str::from_utf8(&source[prev_end..child.start_byte()])
+                    .unwrap_or("")
+                    .to_string();
+                let text = std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
+                    .unwrap_or("")
+                    .to_string();
+                prev_end = child.end_byte();
+                items.push(Item {
+                    leading,
+                    kind: "pair".to_string(),
+                    name: key,
+                    text,
+                });
+            }
+            _ => continue, // skip anonymous nodes (comments etc)
+        }
+    }
+    // Trailing content.
+    let src_len = source.len();
+    if prev_end < src_len {
+        let trailing = std::str::from_utf8(&source[prev_end..src_len])
+            .unwrap_or("")
+            .to_string();
+        if !trailing.trim().is_empty() {
+            items.push(Item {
+                leading: String::new(),
+                kind: "__trailing__".to_string(),
+                name: "__trailing__".to_string(),
+                text: trailing,
+            });
+        }
+    }
+    items
+}
+
 /// Try to extract a name for a top-level AST node.
 fn item_name(node: tree_sitter::Node, source: &[u8], ext: &str) -> Option<String> {
     // Common pattern: node has a `name` field.
@@ -213,6 +327,34 @@ fn item_name(node: tree_sitter::Node, source: &[u8], ext: &str) -> Option<String
                         }
                     }
                 }
+            }
+        }
+        "toml" => {
+            // table / table_array_element: use the first line (header)
+            // as the name. But the REAL value comes from flattened
+            // extraction in extract_items_toml — see below.
+            match node.kind() {
+                "table" | "table_array_element" => {
+                    return Some(
+                        node_text_raw(node, source)
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .trim()
+                            .to_string(),
+                    );
+                }
+                "pair" => {
+                    let mut c = node.walk();
+                    for child in node.children(&mut c) {
+                        if child.kind() == "key" || child.kind() == "bare_key"
+                            || child.kind() == "dotted_key"
+                        {
+                            return Some(node_text_raw(child, source).trim().to_string());
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         _ => {}
@@ -412,6 +554,7 @@ fn merge_changed_item_recursive(
         "rs" => tree_sitter_rust::LANGUAGE.into(),
         "css" => tree_sitter_css::LANGUAGE.into(),
         "html" | "htm" => tree_sitter_html::LANGUAGE.into(),
+        "toml" => tree_sitter_toml_ng::LANGUAGE.into(),
         _ => return None,
     };
     let mut parser = tree_sitter::Parser::new();

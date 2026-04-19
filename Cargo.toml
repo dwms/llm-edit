@@ -16,6 +16,7 @@ tree-sitter-typescript = "0.23"
 tree-sitter-rust = "0.24"
 tree-sitter-css = "0.25"
 tree-sitter-html = "0.23"
+tree-sitter-toml-ng = "0.7"
 sha2 = "0.10"
 hex = "0.4"
 

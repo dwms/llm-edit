@@ -2012,6 +2012,7 @@ pub fn parses_cleanly(path: &Path, text: &str) -> bool {
         "rs" => tree_sitter_rust::LANGUAGE.into(),
         "css" => tree_sitter_css::LANGUAGE.into(),
         "html" | "htm" => tree_sitter_html::LANGUAGE.into(),
+        "toml" => tree_sitter_toml_ng::LANGUAGE.into(),
         _ => return true,
     };
     let mut parser = tree_sitter::Parser::new();
