@@ -430,6 +430,30 @@ fn run_init(cwd: &Path) -> Result<()> {
     // 3. Create the scratch directory (hooks expect it to exist).
     std::fs::create_dir_all(cwd.join(".llm-edit"))?;
 
+    // 4. Install Claude Code integration: CLAUDE.md project instructions
+    //    + PreToolUse hook that nudges agents toward llm-edit subcommands.
+    let claude_md = cwd.join("CLAUDE.md");
+    if !claude_md.exists() {
+        std::fs::write(&claude_md, include_str!("../../CLAUDE.md"))?;
+        println!("  created CLAUDE.md");
+    }
+    let claude_hooks = cwd.join(".claude/hooks");
+    std::fs::create_dir_all(&claude_hooks)?;
+    let hook_path = claude_hooks.join("prefer-llm-edit.sh");
+    std::fs::write(&hook_path, include_str!("../../.claude/hooks/prefer-llm-edit.sh"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&hook_path)?.permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&hook_path, perms)?;
+    }
+    let settings_path = cwd.join(".claude/settings.json");
+    if !settings_path.exists() {
+        std::fs::write(&settings_path, include_str!("../../.claude/settings.json"))?;
+    }
+    println!("  installed Claude Code hooks");
+
     println!("\nllm-edit initialized. Usage:");
     println!("  llm-edit rename-symbol --file src/foo.rs old_name new_name");
     println!("  llm-edit add-file --file src/new.rs --content '...'");
