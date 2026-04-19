@@ -19,4 +19,7 @@ LOG_FILE="$REPO_ROOT/.llm-edit/log.jsonl"
 LAST_BODY="$(git log -1 --format=%B)"
 if grep -qF '```llm-edit-ops' <<<"$LAST_BODY"; then
   : > "$LOG_FILE"
+  # Stage the cleared file so git doesn't see it as a dirty local
+  # modification blocking the next checkout.
+  git add "$LOG_FILE" 2>/dev/null || true
 fi
