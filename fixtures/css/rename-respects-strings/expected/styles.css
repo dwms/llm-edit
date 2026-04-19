@@ -1,0 +1,12 @@
+/* The .card class is our primary container */
+.tile {
+  padding: 16px;
+}
+
+.tile-header {
+  font-weight: bold;
+}
+
+.sidebar {
+  content: ".card placeholder";
+}

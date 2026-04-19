@@ -2010,6 +2010,8 @@ pub fn parses_cleanly(path: &Path, text: &str) -> bool {
         "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         "rs" => tree_sitter_rust::LANGUAGE.into(),
+        "css" => tree_sitter_css::LANGUAGE.into(),
+        "html" | "htm" => tree_sitter_html::LANGUAGE.into(),
         _ => return true,
     };
     let mut parser = tree_sitter::Parser::new();
