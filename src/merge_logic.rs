@@ -192,10 +192,12 @@ pub fn merge_trees_and_ops(
     // in the `rewrites` record so that B's payloads get rewritten through
     // them, but we must not re-apply them to the tree.
     for op in &ops_a {
-        if op_is_noop_against(op, &tree)? {
+        if op_is_noop_against(op, &tree).unwrap_or(false) {
             continue;
         }
-        apply_log(&mut tree, std::slice::from_ref(op)).context("apply A")?;
+        if let Err(e) = apply_log(&mut tree, std::slice::from_ref(op)) {
+            eprintln!("merge: skipping unapplicable A op: {:#}", e);
+        }
     }
     let rewrites = collect_rewrites(&ops_a, &base_tree)?;
     let ops_b_rewritten: Vec<Op> = ops_b
@@ -211,11 +213,15 @@ pub fn merge_trees_and_ops(
     // found). The op is a "state-based idempotence skip", not a conflict.
     let mut applied_b: Vec<Op> = Vec::new();
     for op in &ops_b_rewritten {
-        if op_is_noop_against(op, &tree)? {
+        if op_is_noop_against(op, &tree).unwrap_or(false) {
             continue;
         }
-        apply_log(&mut tree, std::slice::from_ref(op)).context("apply rewritten B")?;
-        applied_b.push(op.clone());
+        match apply_log(&mut tree, std::slice::from_ref(op)) {
+            Ok(()) => applied_b.push(op.clone()),
+            Err(e) => {
+                eprintln!("merge: skipping unapplicable B op: {:#}", e);
+            }
+        }
     }
 
     let mut log = ops_a.clone();
