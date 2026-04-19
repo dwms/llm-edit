@@ -59,7 +59,7 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
                     for (path, text) in tree.iter_mut() {
                         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
                         match ext {
-                            "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" => {
+                            "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "rs" => {
                                 *text = rename_in_source_file(text, path, old, new, *respect_shadowing);
                             }
                             "html" | "htm" => {
