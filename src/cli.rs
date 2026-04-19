@@ -420,16 +420,63 @@ pub fn run_infer() -> Result<(usize, usize)> {
                 if file_inferred > 0 {
                     inferred += file_inferred;
                 } else {
-                    // Catch-all: infer a file-scoped op from the overall
-                    // diff. Uses common-prefix/suffix narrowing to find
-                    // the single changed region. Handles replacements,
-                    // insertions, and deletions.
-                    if let Some(op_val) = infer_file_level_change(rel, &before, &after) {
-                        let label = op_val.get("op").and_then(|v| v.as_str()).unwrap_or("op").to_string();
-                        let parsed: Op = serde_json::from_value(op_val)?;
-                        new_ops.push(parsed);
-                        inferred += 1;
-                        println!("  {} (file)  {}", label, rel);
+                    // Catch-all: decompose the remaining diff into
+                    // single-region ops. Iteratively finds the first
+                    // contiguous change, emits an op, "applies" it to
+                    // advance, and repeats until before == after or
+                    // no more changes are found.
+                    let mut residual = before.clone();
+                    let mut catchall_count = 0usize;
+                    while residual != after {
+                        match infer_file_level_change(rel, &residual, &after) {
+                            Some(op_val) => {
+                                let label = op_val.get("op").and_then(|v| v.as_str()).unwrap_or("op").to_string();
+                                // "Apply" the op conceptually so the next
+                                // iteration sees the remaining diff.
+                                if let Some(old) = op_val.get("old").and_then(|v| v.as_str()) {
+                                    let new = op_val.get("new").and_then(|v| v.as_str()).unwrap_or("");
+                                    if let Some(pos) = residual.find(old) {
+                                        let mut applied = String::with_capacity(residual.len());
+                                        applied.push_str(&residual[..pos]);
+                                        applied.push_str(new);
+                                        applied.push_str(&residual[pos + old.len()..]);
+                                        residual = applied;
+                                    } else {
+                                        residual = after.clone(); // give up
+                                    }
+                                } else if let Some(needle) = op_val.get("anchor")
+                                    .and_then(|a| a.get("after_line_contains"))
+                                    .and_then(|v| v.as_str())
+                                {
+                                    // insert_after: find the anchor line
+                                    // and insert content after it.
+                                    let content = op_val.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                                    if let Some(line_end) = residual.find(needle).and_then(|p| residual[p..].find('\n').map(|o| p + o)) {
+                                        let mut applied = String::with_capacity(residual.len() + content.len());
+                                        applied.push_str(&residual[..line_end + 1]);
+                                        applied.push_str(content);
+                                        if !content.ends_with('\n') { applied.push('\n'); }
+                                        applied.push_str(&residual[line_end + 1..]);
+                                        residual = applied;
+                                    } else {
+                                        residual = after.clone();
+                                    }
+                                } else {
+                                    residual = after.clone();
+                                }
+                                let parsed: Op = serde_json::from_value(op_val)?;
+                                new_ops.push(parsed);
+                                catchall_count += 1;
+                                println!("  {} (file)  {}", label, rel);
+                            }
+                            None => break,
+                        }
+                        if catchall_count > 10 {
+                            break; // safety: don't loop forever on pathological diffs
+                        }
+                    }
+                    if catchall_count > 0 {
+                        inferred += catchall_count;
                     } else {
                         skipped += 1;
                         println!("  skip  {}  (no pattern detected)", rel);
