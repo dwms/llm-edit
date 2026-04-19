@@ -31,12 +31,17 @@ enum Cmd {
         #[arg(long)]
         json: String,
     },
-    /// Rename a module-scoped identifier across one file.
+    /// Rename an identifier. With --scope module (default), renames in
+    /// one file. With --scope project, renames across all source files
+    /// (Rust, Python, JS/TS, HTML).
     RenameSymbol {
         #[arg(long)]
         file: String,
         old: String,
         new: String,
+        /// "module" (default) = single file; "project" = all source files.
+        #[arg(long, default_value = "module")]
+        scope: String,
     },
     /// Rename a CSS class across the whole project (CSS rules + HTML
     /// `class=` attributes).
@@ -343,9 +348,9 @@ fn main() -> Result<()> {
         })
         .to_string(),
         Cmd::Apply { json } => json,
-        Cmd::RenameSymbol { file, old, new } => json!({
+        Cmd::RenameSymbol { file, old, new, scope } => json!({
             "op": "rename_symbol",
-            "scope": "module",
+            "scope": scope,
             "file": file,
             "old": old,
             "new": new,
