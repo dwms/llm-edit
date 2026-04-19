@@ -56,18 +56,7 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
                     *text = rename_in_source_file(text, &path, old, new, *respect_shadowing);
                 }
                 "project" => {
-                    for (path, text) in tree.iter_mut() {
-                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                        match ext {
-                            "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "rs" => {
-                                *text = rename_in_source_file(text, path, old, new, *respect_shadowing);
-                            }
-                            "html" | "htm" => {
-                                *text = rename_word_boundary(text, old, new);
-                            }
-                            _ => {}
-                        }
-                    }
+                    propagate_symbol_rename(tree, old, new, *respect_shadowing);
                 }
                 _ => return Err(anyhow!("unsupported rename_symbol scope: {}", scope)),
             }
@@ -77,14 +66,7 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
             if scope != "project" {
                 return Err(anyhow!("only scope=project supported in v0"));
             }
-            for (path, text) in tree.iter_mut() {
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                match ext {
-                    "css" => *text = rename_css_selector_class(text, old, new),
-                    "html" | "htm" => *text = rename_html_class_attr(text, old, new),
-                    _ => {}
-                }
-            }
+            propagate_css_class_rename(tree, old, new);
             Ok(())
         }
         Op::AddFunction { anchor, after, source, .. } => {
@@ -412,6 +394,99 @@ fn anchor_path_last_kind_index(anchor: &serde_json::Value) -> Result<(String, us
         .and_then(|v| v.as_u64())
         .ok_or_else(|| anyhow!("last segment missing index"))? as usize;
     Ok((kind, index))
+}
+
+// ----- cross-language propagation registry ---------------------------------
+//
+// Each entry maps a file extension to a rewrite strategy for a given
+// op kind. Adding a new language edge (e.g., "CSS custom property
+// rename propagates to HTML inline styles") = adding one match arm.
+// This replaces the ad-hoc inline dispatch that was scattered across
+// the apply_op match arms.
+
+/// Propagate a symbol rename across all source files in the tree.
+/// Dispatches per extension: AST rename for source languages, word-
+/// boundary rename for markup (HTML).
+fn propagate_symbol_rename(tree: &mut Tree, old: &str, new: &str, respect_shadowing: bool) {
+    // Collect paths first to satisfy borrow checker (can't iterate
+    // tree.iter_mut() while reading paths).
+    let paths: Vec<PathBuf> = tree.keys().cloned().collect();
+    for path in paths {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        match symbol_rename_strategy(ext) {
+            RenameStrategy::Ast => {
+                if let Some(text) = tree.get_mut(&path) {
+                    *text = rename_in_source_file(text, &path, old, new, respect_shadowing);
+                }
+            }
+            RenameStrategy::WordBoundary => {
+                if let Some(text) = tree.get_mut(&path) {
+                    *text = rename_word_boundary(text, old, new);
+                }
+            }
+            RenameStrategy::Skip => {}
+        }
+    }
+}
+
+/// Propagate a CSS class rename across CSS and HTML files.
+fn propagate_css_class_rename(tree: &mut Tree, old: &str, new: &str) {
+    let paths: Vec<PathBuf> = tree.keys().cloned().collect();
+    for path in paths {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        match css_class_rename_strategy(ext) {
+            CssClassStrategy::CssSelector => {
+                if let Some(text) = tree.get_mut(&path) {
+                    *text = rename_css_selector_class(text, old, new);
+                }
+            }
+            CssClassStrategy::HtmlClassAttr => {
+                if let Some(text) = tree.get_mut(&path) {
+                    *text = rename_html_class_attr(text, old, new);
+                }
+            }
+            CssClassStrategy::JsxClassName => {
+                if let Some(text) = tree.get_mut(&path) {
+                    // JSX/TSX className="..." uses the same word-boundary
+                    // approach as HTML class attrs.
+                    *text = rename_word_boundary(text, old, new);
+                }
+            }
+            CssClassStrategy::Skip => {}
+        }
+    }
+}
+
+/// How to rename a symbol identifier in a file of the given extension.
+enum RenameStrategy {
+    Ast,
+    WordBoundary,
+    Skip,
+}
+
+fn symbol_rename_strategy(ext: &str) -> RenameStrategy {
+    match ext {
+        "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "rs" => RenameStrategy::Ast,
+        "html" | "htm" => RenameStrategy::WordBoundary,
+        _ => RenameStrategy::Skip,
+    }
+}
+
+/// How to rename a CSS class in a file of the given extension.
+enum CssClassStrategy {
+    CssSelector,
+    HtmlClassAttr,
+    JsxClassName,
+    Skip,
+}
+
+fn css_class_rename_strategy(ext: &str) -> CssClassStrategy {
+    match ext {
+        "css" => CssClassStrategy::CssSelector,
+        "html" | "htm" => CssClassStrategy::HtmlClassAttr,
+        "jsx" | "tsx" => CssClassStrategy::JsxClassName,
+        _ => CssClassStrategy::Skip,
+    }
 }
 
 // ----- textual heuristics --------------------------------------------------
