@@ -277,7 +277,91 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
             tree.insert(to_path, content);
             Ok(())
         }
+        Op::ChangeSignature { file, fn_name, add_params, remove_params } => {
+            let path = PathBuf::from(file);
+            let text = tree.get_mut(&path)
+                .ok_or_else(|| anyhow!("change_signature: {} not found", file))?;
+            *text = change_fn_signature(text, fn_name, add_params, remove_params)?;
+            Ok(())
+        }
     }
+}
+
+/// Rewrite a function's parameter list: remove named params and append
+/// new ones. Works for Python (`def f(a, b):`) and Rust (`fn f(a: i32,
+/// b: bool)`) — both use `(...)` delimited param lists.
+fn change_fn_signature(
+    source: &str,
+    fn_name: &str,
+    add_params: &[String],
+    remove_params: &[String],
+) -> Result<String> {
+    // Find `fn_name(` — the opening paren of the function signature.
+    let needle = format!("{}(", fn_name);
+    let Some(name_pos) = source.find(&needle) else {
+        return Err(anyhow!("change_signature: function `{}` not found", fn_name));
+    };
+    let open = name_pos + fn_name.len(); // position of `(`
+    // Find matching `)` — simple scan (no nested parens in param lists
+    // for the v0 languages we support).
+    let rest = &source[open..];
+    let mut depth = 0usize;
+    let mut close = None;
+    for (i, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + i);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let close = close.ok_or_else(|| anyhow!("change_signature: unmatched `(` for {}", fn_name))?;
+    let params_str = &source[open + 1..close]; // between ( and )
+    // Parse existing params: split on `,`, trim each.
+    let mut params: Vec<String> = if params_str.trim().is_empty() {
+        Vec::new()
+    } else {
+        params_str.split(',').map(|p| p.trim().to_string()).collect()
+    };
+    // Remove params by name (match the param name, which is the part
+    // before `:` for typed langs or the whole token for Python).
+    for rm in remove_params {
+        params.retain(|p| {
+            let name_part = p.split(&[':', '='][..]).next().unwrap_or(p).trim();
+            // Also strip leading &, &mut, self qualifiers for Rust.
+            let clean = name_part
+                .trim_start_matches("&mut ")
+                .trim_start_matches("&")
+                .trim_start_matches("mut ")
+                .trim();
+            clean != rm.as_str()
+        });
+    }
+    // Append new params.
+    for add in add_params {
+        if !params.iter().any(|p| {
+            let name_part = p.split(&[':', '='][..]).next().unwrap_or(p).trim();
+            let clean = name_part
+                .trim_start_matches("&mut ")
+                .trim_start_matches("&")
+                .trim_start_matches("mut ")
+                .trim();
+            clean == add.split(':').next().unwrap_or(add).trim()
+        }) {
+            params.push(add.clone());
+        }
+    }
+    let new_params = params.join(", ");
+    let mut out = String::with_capacity(source.len() + new_params.len());
+    out.push_str(&source[..open + 1]); // up to and including `(`
+    out.push_str(&new_params);
+    out.push_str(&source[close..]); // from `)` onward
+    Ok(out)
 }
 
 // ----- anchor helpers ------------------------------------------------------

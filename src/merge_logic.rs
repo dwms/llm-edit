@@ -500,6 +500,24 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
         Op::MoveFile { from, to } => {
             Ok(!tree.contains_key(&PathBuf::from(from)) && tree.contains_key(&PathBuf::from(to)))
         }
+        Op::ChangeSignature { file, fn_name, add_params, remove_params } => {
+            let Some(text) = tree.get(&PathBuf::from(file)) else {
+                return Ok(false);
+            };
+            // Already applied iff all add_params are present in the
+            // signature AND all remove_params are absent.
+            let sig_start = text.find(&format!("{}(", fn_name));
+            let Some(sig_start) = sig_start else { return Ok(false); };
+            let rest = &text[sig_start..];
+            let sig_end = rest.find(')').unwrap_or(rest.len());
+            let sig = &rest[..sig_end];
+            let adds_present = add_params.iter().all(|p| {
+                let name = p.split(':').next().unwrap_or(p).trim();
+                sig.contains(name)
+            });
+            let removes_absent = remove_params.iter().all(|p| !sig.contains(p.as_str()));
+            Ok(adds_present && removes_absent)
+        }
         _ => Ok(false),
     }
 }

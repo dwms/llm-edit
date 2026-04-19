@@ -2366,7 +2366,7 @@ mod tests {
 fn pending_op_file(op: &Op) -> Option<String> {
     match op {
         Op::RenameSymbol { file, .. } => Some(file.clone()),
-        Op::AddFile { file, .. } | Op::DeleteFile { file } => Some(file.clone()),
+        Op::AddFile { file, .. } | Op::DeleteFile { file } | Op::ChangeSignature { file, .. } => Some(file.clone()),
         Op::MoveFile { from, .. } => Some(from.clone()),
         Op::AddFunction { anchor, .. }
         | Op::DeleteFunction { anchor }

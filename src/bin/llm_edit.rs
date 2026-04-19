@@ -105,6 +105,20 @@ enum Cmd {
         #[arg(long)]
         to: String,
     },
+    /// Add or remove parameters from a function signature.
+    #[command(name = "change-signature")]
+    ChangeSignature {
+        #[arg(long)]
+        file: String,
+        #[arg(long = "fn")]
+        fn_name: String,
+        /// Parameters to append (e.g. "verbose: bool"). Repeatable.
+        #[arg(long = "add")]
+        add_params: Vec<String>,
+        /// Parameter names to remove. Repeatable.
+        #[arg(long = "remove")]
+        remove_params: Vec<String>,
+    },
     /// Delete an entire function from a file.
     #[command(name = "delete-function")]
     DeleteFunction {
@@ -283,6 +297,14 @@ fn main() -> Result<()> {
             "op": "move_file",
             "from": from,
             "to": to,
+        })
+        .to_string(),
+        Cmd::ChangeSignature { file, fn_name, add_params, remove_params } => json!({
+            "op": "change_signature",
+            "file": file,
+            "fn_name": fn_name,
+            "add_params": add_params,
+            "remove_params": remove_params,
         })
         .to_string(),
         Cmd::AddFunction { file, after, name, source } => json!({

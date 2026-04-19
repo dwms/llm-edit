@@ -126,6 +126,14 @@ pub enum Op {
         from: String,
         to: String,
     },
+    ChangeSignature {
+        file: String,
+        fn_name: String,
+        #[serde(default)]
+        add_params: Vec<String>,
+        #[serde(default)]
+        remove_params: Vec<String>,
+    },
 }
 
 pub fn parse_log(text: &str) -> anyhow::Result<Vec<Op>> {
