@@ -794,7 +794,63 @@ pub fn rename_word_boundary(text: &str, old: &str, new: &str) -> String {
 
 /// Replace `.old` → `.new` in CSS where it's a class selector token.
 pub fn rename_css_selector_class(text: &str, old: &str, new: &str) -> String {
-    // Match `.` followed by `old` followed by non-ident char (or EOF).
+    // AST-backed: parse with tree-sitter-css, find class_selector nodes
+    // whose class_name matches `old`, rewrite only those. Leaves comments,
+    // strings (`content: ".old"`), and non-matching selectors untouched.
+    let mut parser = tree_sitter::Parser::new();
+    if parser.set_language(&tree_sitter_css::LANGUAGE.into()).is_err() {
+        // Fallback to text-based rename if parser setup fails.
+        return rename_css_selector_class_text(text, old, new);
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return rename_css_selector_class_text(text, old, new);
+    };
+    // Collect byte ranges of class names to rewrite (must collect first
+    // to avoid invalidating positions during replacement).
+    let mut replacements: Vec<(usize, usize)> = Vec::new();
+    collect_css_class_hits(tree.root_node(), text.as_bytes(), old, &mut replacements);
+    if replacements.is_empty() {
+        return text.to_string();
+    }
+    // Apply replacements right-to-left to preserve earlier positions.
+    let mut out = text.to_string();
+    for &(start, end) in replacements.iter().rev() {
+        out.replace_range(start..end, new);
+    }
+    out
+}
+
+/// Walk the CSS AST and collect (start, end) byte ranges of class
+/// names inside class_selector nodes that match `old`.
+fn collect_css_class_hits(
+    node: tree_sitter::Node,
+    source: &[u8],
+    old: &str,
+    hits: &mut Vec<(usize, usize)>,
+) {
+    // class_selector contains a "." token + a class_name child.
+    // We want the class_name child's byte range.
+    if node.kind() == "class_name" {
+        let text = std::str::from_utf8(&source[node.start_byte()..node.end_byte()]).unwrap_or("");
+        // Exact match: `.hero` → `.banner`
+        if text == old {
+            hits.push((node.start_byte(), node.end_byte()));
+        }
+        // BEM prefix match: `.hero-title` → `.banner-title`
+        // (hyphenated variants share a semantic block name)
+        if text.starts_with(old) && text.as_bytes().get(old.len()) == Some(&b'-') {
+            hits.push((node.start_byte(), node.start_byte() + old.len()));
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_css_class_hits(child, source, old, hits);
+    }
+}
+
+/// Text-based fallback for CSS class rename (used when tree-sitter
+/// parse fails or isn't available).
+fn rename_css_selector_class_text(text: &str, old: &str, new: &str) -> String {
     let needle = format!(".{}", old);
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();

@@ -60,6 +60,8 @@ pub fn ast_merge(path: &Path, base: &str, ours: &str, theirs: &str) -> AstMergeR
         "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         "rs" => tree_sitter_rust::LANGUAGE.into(),
+        "css" => tree_sitter_css::LANGUAGE.into(),
+        "html" | "htm" => tree_sitter_html::LANGUAGE.into(),
         _ => return AstMergeResult::NotApplicable,
     };
 
@@ -408,6 +410,8 @@ fn merge_changed_item_recursive(
         "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         "tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         "rs" => tree_sitter_rust::LANGUAGE.into(),
+        "css" => tree_sitter_css::LANGUAGE.into(),
+        "html" | "htm" => tree_sitter_html::LANGUAGE.into(),
         _ => return None,
     };
     let mut parser = tree_sitter::Parser::new();
