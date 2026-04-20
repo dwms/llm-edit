@@ -24,7 +24,10 @@ For edits without recorded ops, llm-edit falls back to AST-aware 3-way merge (sp
 ## Install
 
 ```bash
-# Clone and build (requires Rust toolchain)
+# Homebrew (macOS / Linux)
+brew install dwms/tap/llm-edit
+
+# …or clone and build from source (requires Rust toolchain)
 git clone git@github.com:dwms/llm-edit.git
 cd llm-edit
 cargo build --release
@@ -73,6 +76,18 @@ llm-edit git-rebase main
 # Interactive rebase also supported:
 llm-edit git-rebase main -i
 ```
+
+### Claude Code integration
+
+When Claude Code edits files in this repo, hooks in `.claude/hooks/` keep the op log live without the agent having to call subcommands explicitly:
+
+| Hook | Event | What it does |
+|---|---|---|
+| `llm-edit-pre.sh` | `PreToolUse` on `Edit`/`Write` | Intercepts unambiguous intents — `Write` to a new path is routed through `add-file`; `Edit` with `replace_all: true` on a bare identifier is routed through `rename-symbol`. The agent's tool call is suppressed; the op is recorded with full intent. |
+| `llm-edit-post.sh` | `PostToolUse` on `Edit`/`Write` | Runs `llm-edit infer` on the resulting working tree to backfill ops from the diff. Catches everything the pre hook didn't intercept. |
+| `llm-edit-bash.sh` | `PreToolUse` on `Bash` | Blocks raw `git merge` / `git rebase` with a message redirecting to `llm-edit git-merge` / `llm-edit git-rebase`. Bypass with `LLM_EDIT_BYPASS=1` (e.g. for `git merge --abort`). |
+
+Net effect: agents call `Edit`/`Write` and `git` normally; ops get recorded and merges go through the structured-op path automatically. The hooks no-op silently until `cargo build --release` produces the binary.
 
 ### All subcommands
 

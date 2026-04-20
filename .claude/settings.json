@@ -6,7 +6,27 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/prefer-llm-edit.sh"
+            "command": ".claude/hooks/llm-edit-pre.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/llm-edit-bash.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".claude/hooks/llm-edit-post.sh"
           }
         ]
       }

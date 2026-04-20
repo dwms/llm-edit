@@ -2,6 +2,9 @@
 name = "llm-edit"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+description = "Structured-op merge tool for multi-agent git workflows"
+repository = "https://github.com/dwms/llm-edit"
 
 [dependencies]
 anyhow = "1"
