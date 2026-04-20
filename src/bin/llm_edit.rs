@@ -431,7 +431,9 @@ fn run_init(cwd: &Path) -> Result<()> {
     std::fs::create_dir_all(cwd.join(".llm-edit"))?;
 
     // 4. Install Claude Code integration: CLAUDE.md project instructions
-    //    + PreToolUse hook that nudges agents toward llm-edit subcommands.
+    //    plus three hooks that auto-record ops so the agent never has to
+    //    call llm-edit subcommands by hand. See .claude/hooks/ for what
+    //    each one does.
     let claude_md = cwd.join("CLAUDE.md");
     if !claude_md.exists() {
         std::fs::write(&claude_md, include_str!("../../CLAUDE.md"))?;
@@ -439,15 +441,9 @@ fn run_init(cwd: &Path) -> Result<()> {
     }
     let claude_hooks = cwd.join(".claude/hooks");
     std::fs::create_dir_all(&claude_hooks)?;
-    let hook_path = claude_hooks.join("prefer-llm-edit.sh");
-    std::fs::write(&hook_path, include_str!("../../.claude/hooks/prefer-llm-edit.sh"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&hook_path)?.permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&hook_path, perms)?;
-    }
+    write_hook(&claude_hooks, "llm-edit-pre.sh", include_str!("../../.claude/hooks/llm-edit-pre.sh"))?;
+    write_hook(&claude_hooks, "llm-edit-post.sh", include_str!("../../.claude/hooks/llm-edit-post.sh"))?;
+    write_hook(&claude_hooks, "llm-edit-bash.sh", include_str!("../../.claude/hooks/llm-edit-bash.sh"))?;
     let settings_path = cwd.join(".claude/settings.json");
     if !settings_path.exists() {
         std::fs::write(&settings_path, include_str!("../../.claude/settings.json"))?;
