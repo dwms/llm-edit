@@ -23,8 +23,9 @@ jobs:
         include:
           - os: macos-14
             target: aarch64-apple-darwin
-          - os: macos-13
-            target: x86_64-apple-darwin
+          # x86_64-apple-darwin intentionally omitted: GitHub's macos-13
+          # (Intel) runner pool is heavily oversubscribed (multi-hour
+          # queues). Add back when there's demand from an Intel Mac user.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
     steps:

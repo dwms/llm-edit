@@ -17,14 +17,14 @@ class LlmEdit < Formula
   version "0.1.0"
   license "MIT"
 
+  # No x86_64-apple-darwin bottle yet — Intel Mac runners are starved on
+  # CI. Intel users can `brew install --build-from-source` against the
+  # source tarball, or build from `git clone` directly.
+  depends_on arch: :arm64 if OS.mac?
+
   on_macos do
-    if Hardware::CPU.arm?
-      url "https://github.com/dwms/llm-edit/releases/download/v#{version}/llm-edit-#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "REPLACE_WITH_AARCH64_DARWIN_SHA256"
-    else
-      url "https://github.com/dwms/llm-edit/releases/download/v#{version}/llm-edit-#{version}-x86_64-apple-darwin.tar.gz"
-      sha256 "REPLACE_WITH_X86_64_DARWIN_SHA256"
-    end
+    url "https://github.com/dwms/llm-edit/releases/download/v#{version}/llm-edit-#{version}-aarch64-apple-darwin.tar.gz"
+    sha256 "REPLACE_WITH_AARCH64_DARWIN_SHA256"
   end
 
   on_linux do
