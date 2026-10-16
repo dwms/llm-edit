@@ -232,7 +232,9 @@ fn enumerate_files(roots: &[&PathBuf]) -> Result<Vec<PathBuf>> {
 }
 
 fn file_chars(p: &Path) -> Result<usize> {
-    Ok(fs::read_to_string(p).map(|s| s.chars().count()).unwrap_or(0))
+    Ok(fs::read_to_string(p)
+        .map(|s| s.chars().count())
+        .unwrap_or(0))
 }
 
 fn sum_tree_chars(root: &Path) -> Result<usize> {

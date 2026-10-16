@@ -7,8 +7,8 @@
 #      whitespace/structure corruption the moment it would land,
 #      instead of letting it metastasize across subsequent merges.
 #   2. infer — backfill rename_symbol / structural ops from text edits
-#      so the committed `.llm-edit/log.jsonl` stays aligned with the
-#      tree. Recorded ops let the next merge use the semantic path
+#      so pending operations stay aligned with the tree before the
+#      commit-message hook embeds them. Recorded ops let the next merge use the semantic path
 #      instead of the (lossy) AST text fallback.
 #
 # Both steps are best-effort: if the binaries aren't built yet, the
@@ -17,12 +17,24 @@
 set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-# Allow override via env so users (and tests) can point at a built
-# binary outside the repo without copying it in.
-LINT_BIN="${LLM_EDIT_LINT_BIN:-$REPO_ROOT/target/release/lint_parse}"
-LLM_BIN="${LLM_EDIT_BIN:-$REPO_ROOT/target/release/llm-edit}"
+# Resolution order for each binary:
+#   1. explicit env override (LLM_EDIT_LINT_BIN / LLM_EDIT_BIN)
+#   2. local build in $REPO_ROOT/target/release (dogfood case)
+#   3. PATH lookup (brew / system install — hook used in other repos)
+resolve_bin() {
+  local override="$1" name="$2"
+  if [[ -n "$override" ]]; then
+    echo "$override"; return
+  fi
+  if [[ -x "$REPO_ROOT/target/release/$name" ]]; then
+    echo "$REPO_ROOT/target/release/$name"; return
+  fi
+  command -v "$name" 2>/dev/null || true
+}
+LINT_BIN="$(resolve_bin "${LLM_EDIT_LINT_BIN:-}" lint_parse)"
+LLM_BIN="$(resolve_bin "${LLM_EDIT_BIN:-}" llm-edit)"
 
-if [[ ! -x "$LINT_BIN" || ! -x "$LLM_BIN" ]]; then
+if [[ -z "$LINT_BIN" || ! -x "$LINT_BIN" || -z "$LLM_BIN" || ! -x "$LLM_BIN" ]]; then
   echo "pre-commit: llm-edit binaries not built yet; skipping checks." >&2
   echo "  run: cargo build --release" >&2
   exit 0
@@ -43,7 +55,7 @@ fi
 # 2. Infer ops from text edits and append to .llm-edit/log.jsonl.
 # Only run if there are working-tree changes the infer pass can analyze.
 # `infer` walks `git diff --name-only HEAD` so it sees both staged and
-# unstaged source changes; we re-stage the log if it changed.
+# unstaged source changes; the log remains ignored scratch space.
 PRE_LOG_HASH=""
 if [[ -f "$REPO_ROOT/.llm-edit/log.jsonl" ]]; then
   PRE_LOG_HASH="$(shasum "$REPO_ROOT/.llm-edit/log.jsonl" | awk '{print $1}')"

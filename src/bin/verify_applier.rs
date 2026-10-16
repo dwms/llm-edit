@@ -41,7 +41,12 @@ fn main() -> Result<()> {
                     println!("PASS  {} / {}", rel(case), agent);
                 }
                 Ok(diffs) => {
-                    println!("FAIL  {} / {}  ({} file(s) differ)", rel(case), agent, diffs.len());
+                    println!(
+                        "FAIL  {} / {}  ({} file(s) differ)",
+                        rel(case),
+                        agent,
+                        diffs.len()
+                    );
                     for (p, reason) in diffs {
                         println!("        - {}: {}", p.display(), reason);
                     }
@@ -54,7 +59,10 @@ fn main() -> Result<()> {
     }
 
     println!();
-    println!("applier verification: {}/{} agent logs reproduce their worktree exactly", ok, total);
+    println!(
+        "applier verification: {}/{} agent logs reproduce their worktree exactly",
+        ok, total
+    );
     if ok != total {
         std::process::exit(1);
     }

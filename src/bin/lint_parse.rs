@@ -29,7 +29,10 @@ fn main() -> ExitCode {
     if bad.is_empty() {
         ExitCode::from(0)
     } else {
-        eprintln!("lint_parse: {} file(s) failed tree-sitter parse:", bad.len());
+        eprintln!(
+            "lint_parse: {} file(s) failed tree-sitter parse:",
+            bad.len()
+        );
         for p in &bad {
             eprintln!("  {}", p);
         }

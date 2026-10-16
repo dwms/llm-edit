@@ -141,7 +141,12 @@ fn extract_items(root: tree_sitter::Node, source: &[u8], ext: &str) -> Vec<Item>
             .to_string();
         prev_named_end = child.end_byte();
         let kind = child.kind().to_string();
-        items.push(Item { leading, kind, name, text });
+        items.push(Item {
+            leading,
+            kind,
+            name,
+            text,
+        });
     }
     // Capture any trailing bytes after the last named item (typically
     // just a final newline; occasionally a trailing trivia comment).
@@ -196,7 +201,12 @@ fn extract_items_toml(root: tree_sitter::Node, source: &[u8]) -> Vec<Item> {
                         let key = {
                             let mut kc = tch.walk();
                             tch.children(&mut kc)
-                                .find(|c| matches!(c.kind(), "bare_key" | "dotted_key" | "key" | "quoted_key"))
+                                .find(|c| {
+                                    matches!(
+                                        c.kind(),
+                                        "bare_key" | "dotted_key" | "key" | "quoted_key"
+                                    )
+                                })
                                 .map(|k| node_text_raw(k, source).trim().to_string())
                                 .unwrap_or_default()
                         };
@@ -228,8 +238,11 @@ fn extract_items_toml(root: tree_sitter::Node, source: &[u8]) -> Vec<Item> {
                 // Root-level pair (before any table header).
                 let key = {
                     let mut kc = child.walk();
-                    child.children(&mut kc)
-                        .find(|c| matches!(c.kind(), "bare_key" | "dotted_key" | "key" | "quoted_key"))
+                    child
+                        .children(&mut kc)
+                        .find(|c| {
+                            matches!(c.kind(), "bare_key" | "dotted_key" | "key" | "quoted_key")
+                        })
                         .map(|k| node_text_raw(k, source).trim().to_string())
                         .unwrap_or_default()
                 };
@@ -347,7 +360,8 @@ fn item_name(node: tree_sitter::Node, source: &[u8], ext: &str) -> Option<String
                 "pair" => {
                     let mut c = node.walk();
                     for child in node.children(&mut c) {
-                        if child.kind() == "key" || child.kind() == "bare_key"
+                        if child.kind() == "key"
+                            || child.kind() == "bare_key"
                             || child.kind() == "dotted_key"
                         {
                             return Some(node_text_raw(child, source).trim().to_string());
@@ -381,10 +395,8 @@ fn node_text_raw(node: tree_sitter::Node, source: &[u8]) -> String {
 /// their blank line, etc. Hardcoded separators would corrupt the
 /// former case.
 fn merge_items(base: &[Item], ours: &[Item], theirs: &[Item], ext: &str) -> AstMergeResult {
-    let base_map: BTreeMap<(String, String), &Item> =
-        base.iter().map(|i| (i.key(), i)).collect();
-    let ours_map: BTreeMap<(String, String), &Item> =
-        ours.iter().map(|i| (i.key(), i)).collect();
+    let base_map: BTreeMap<(String, String), &Item> = base.iter().map(|i| (i.key(), i)).collect();
+    let ours_map: BTreeMap<(String, String), &Item> = ours.iter().map(|i| (i.key(), i)).collect();
     let theirs_map: BTreeMap<(String, String), &Item> =
         theirs.iter().map(|i| (i.key(), i)).collect();
 
@@ -502,7 +514,11 @@ fn merge_items(base: &[Item], ours: &[Item], theirs: &[Item], ext: &str) -> AstM
 /// newlines; tree-sitter node spans often omit them).
 fn diff3_item(ours: &str, base: &str, theirs: &str) -> Result<String, String> {
     let ensure_nl = |s: &str| -> String {
-        if s.ends_with('\n') { s.to_string() } else { format!("{}\n", s) }
+        if s.ends_with('\n') {
+            s.to_string()
+        } else {
+            format!("{}\n", s)
+        }
     };
     let dir = std::env::temp_dir();
     let pid = std::process::id();
@@ -614,7 +630,9 @@ fn merge_changed_item_recursive(
     // the last sub-item and `}`) governs.
     let middle = format!(
         "{}{}",
-        merged_subs_text.strip_suffix('\n').unwrap_or(&merged_subs_text),
+        merged_subs_text
+            .strip_suffix('\n')
+            .unwrap_or(&merged_subs_text),
         trail_o
     );
 
@@ -645,11 +663,7 @@ fn inner_container<'a>(item: tree_sitter::Node<'a>, ext: &str) -> Option<tree_si
 /// reassembly doesn't double-stamp them. Returns the items plus the
 /// trailing whitespace between the last item and the closing brace
 /// (used by the splice to preserve indentation around `}`).
-fn extract_subitems(
-    body: tree_sitter::Node,
-    source: &[u8],
-    ext: &str,
-) -> (Vec<Item>, String) {
+fn extract_subitems(body: tree_sitter::Node, source: &[u8], ext: &str) -> (Vec<Item>, String) {
     let mut items: Vec<Item> = Vec::new();
     // Start position right after the body's opening `{`.
     let mut prev_named_end = body.start_byte() + 1;
@@ -683,7 +697,12 @@ fn extract_subitems(
             .to_string();
         prev_named_end = child.end_byte();
         let kind = child.kind().to_string();
-        items.push(Item { leading, kind, name, text });
+        items.push(Item {
+            leading,
+            kind,
+            name,
+            text,
+        });
     }
     let trailing = if prev_named_end <= body_close {
         std::str::from_utf8(&source[prev_named_end..body_close])

@@ -1,0 +1,24 @@
+name: CI
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --component rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test
+        run: cargo test --locked --all-targets
+      - name: Benchmark regression gate
+        run: cargo run --locked --release --bin bench

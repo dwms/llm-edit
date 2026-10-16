@@ -66,10 +66,7 @@ fn bench_on_synthetic_corpus_scores_correctly() {
     make_negative_case(root);
 
     let bin = env!("CARGO_BIN_EXE_bench");
-    let output = Command::new(bin)
-        .arg(root)
-        .output()
-        .expect("spawn bench");
+    let output = Command::new(bin).arg(root).output().expect("spawn bench");
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 

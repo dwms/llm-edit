@@ -39,7 +39,11 @@ fn main() -> Result<()> {
                 continue;
             }
             total += 1;
-            let rel = case.strip_prefix(&fixtures).unwrap_or(case).display().to_string();
+            let rel = case
+                .strip_prefix(&fixtures)
+                .unwrap_or(case)
+                .display()
+                .to_string();
             match verify_one(case, agent, &tmp_root) {
                 Ok(issues) if issues.is_empty() => {
                     ok += 1;
@@ -56,7 +60,10 @@ fn main() -> Result<()> {
         }
     }
     println!();
-    println!("cli verification: {}/{} replays reproduce worktree + log", ok, total);
+    println!(
+        "cli verification: {}/{} replays reproduce worktree + log",
+        ok, total
+    );
     if ok != total {
         std::process::exit(1);
     }

@@ -75,7 +75,11 @@ fn git_merge_propagates_rename_into_new_caller() {
     run("git", &["config", "user.name", "test"], repo);
 
     // Base commit: source file + empty op log.
-    fs::write(repo.join("app.py"), "def get(user_id):\n    return user_id\n").unwrap();
+    fs::write(
+        repo.join("app.py"),
+        "def get(user_id):\n    return user_id\n",
+    )
+    .unwrap();
     fs::create_dir_all(repo.join(".llm-edit")).unwrap();
     fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
     run("git", &["add", "."], repo);
@@ -96,13 +100,7 @@ fn git_merge_propagates_rename_into_new_caller() {
     // Back to `main`: rename user_id → account_id.
     run("git", &["checkout", "main", "-q"], repo);
     run_llm_edit(
-        &[
-            "rename-symbol",
-            "--file",
-            "app.py",
-            "user_id",
-            "account_id",
-        ],
+        &["rename-symbol", "--file", "app.py", "user_id", "account_id"],
         repo,
     );
     commit_with_ops(repo, "main: rename");
@@ -184,16 +182,8 @@ fn git_merge_hybrid_preserves_unrecorded_edits() {
     run("git", &["config", "user.email", "test@test"], repo);
     run("git", &["config", "user.name", "test"], repo);
 
-    fs::write(
-        repo.join("app.py"),
-        "def get():\n    return 1\n",
-    )
-    .unwrap();
-    fs::write(
-        repo.join("util.py"),
-        "def helper():\n    return 2\n",
-    )
-    .unwrap();
+    fs::write(repo.join("app.py"), "def get():\n    return 1\n").unwrap();
+    fs::write(repo.join("util.py"), "def helper():\n    return 2\n").unwrap();
     fs::create_dir_all(repo.join(".llm-edit")).unwrap();
     fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
     run("git", &["add", "."], repo);
@@ -213,10 +203,7 @@ fn git_merge_hybrid_preserves_unrecorded_edits() {
 
     // main: recorded rename + UNrecorded comment edit on the SAME file.
     run("git", &["checkout", "main", "-q"], repo);
-    run_llm_edit(
-        &["rename-symbol", "--file", "app.py", "get", "fetch"],
-        repo,
-    );
+    run_llm_edit(&["rename-symbol", "--file", "app.py", "get", "fetch"], repo);
     let mut app = fs::read_to_string(repo.join("app.py")).unwrap();
     app.push_str("# fetches the canonical id\n");
     fs::write(repo.join("app.py"), app).unwrap();
@@ -256,8 +243,14 @@ fn git_merge_hybrid_preserves_unrecorded_edits() {
             .stdout,
     )
     .unwrap();
-    assert!(combined_bodies.contains("rename_symbol"), "rename_symbol missing from history");
-    assert!(combined_bodies.contains("add_function"), "add_function missing from history");
+    assert!(
+        combined_bodies.contains("rename_symbol"),
+        "rename_symbol missing from history"
+    );
+    assert!(
+        combined_bodies.contains("add_function"),
+        "add_function missing from history"
+    );
 }
 
 /// `llm-edit infer` derives a rename_symbol op from a textual edit.
@@ -358,12 +351,36 @@ fn infer_detects_python_structural_diffs() {
     run_llm_edit(&["infer"], repo);
 
     let log = fs::read_to_string(repo.join(".llm-edit/log.jsonl")).unwrap();
-    assert!(log.contains("\"op\":\"delete_function\""), "missing delete_function:\n{}", log);
-    assert!(log.contains("\"op\":\"add_function\""), "missing add_function:\n{}", log);
-    assert!(log.contains("\"op\":\"add_import\""), "missing add_import:\n{}", log);
-    assert!(log.contains("\"name\":\"foo\"") || log.contains("\"foo\""), "delete should reference foo:\n{}", log);
-    assert!(log.contains("\"name\":\"baz\""), "add should reference baz:\n{}", log);
-    assert!(log.contains("\"module\":\"sys\""), "add_import should reference sys:\n{}", log);
+    assert!(
+        log.contains("\"op\":\"delete_function\""),
+        "missing delete_function:\n{}",
+        log
+    );
+    assert!(
+        log.contains("\"op\":\"add_function\""),
+        "missing add_function:\n{}",
+        log
+    );
+    assert!(
+        log.contains("\"op\":\"add_import\""),
+        "missing add_import:\n{}",
+        log
+    );
+    assert!(
+        log.contains("\"name\":\"foo\"") || log.contains("\"foo\""),
+        "delete should reference foo:\n{}",
+        log
+    );
+    assert!(
+        log.contains("\"name\":\"baz\""),
+        "add should reference baz:\n{}",
+        log
+    );
+    assert!(
+        log.contains("\"module\":\"sys\""),
+        "add_import should reference sys:\n{}",
+        log
+    );
 }
 
 /// `llm-edit git-rebase` replays the current branch's commits onto a
@@ -464,11 +481,7 @@ fn git_rebase_continue_after_text_conflict() {
     run("git", &["config", "user.name", "test"], repo);
 
     // Base: a simple Python file with an empty op log.
-    fs::write(
-        repo.join("app.py"),
-        "def get():\n    return 1\n",
-    )
-    .unwrap();
+    fs::write(repo.join("app.py"), "def get():\n    return 1\n").unwrap();
     fs::create_dir_all(repo.join(".llm-edit")).unwrap();
     fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
     run("git", &["add", "."], repo);
@@ -522,7 +535,10 @@ fn git_rebase_continue_after_text_conflict() {
     run_llm_edit(&["git-rebase", "--continue"], repo);
 
     // State file gone.
-    assert!(!state_path.exists(), "state file not cleaned up after continue");
+    assert!(
+        !state_path.exists(),
+        "state file not cleaned up after continue"
+    );
 
     // HEAD on feat, app.py resolved.
     let branch = Command::new("git")
@@ -570,11 +586,7 @@ fn git_rebase_abort_restores_original() {
     run("git", &["config", "user.email", "test@test"], repo);
     run("git", &["config", "user.name", "test"], repo);
 
-    fs::write(
-        repo.join("app.py"),
-        "def get():\n    return 1\n",
-    )
-    .unwrap();
+    fs::write(repo.join("app.py"), "def get():\n    return 1\n").unwrap();
     fs::create_dir_all(repo.join(".llm-edit")).unwrap();
     fs::write(repo.join(".llm-edit/log.jsonl"), "").unwrap();
     run("git", &["add", "."], repo);
@@ -779,7 +791,10 @@ fn git_rebase_interactive_drop() {
         subjects
     );
     // b.txt should no longer exist (it was introduced by the dropped commit).
-    assert!(!repo.join("b.txt").exists(), "dropped commit's file still present");
+    assert!(
+        !repo.join("b.txt").exists(),
+        "dropped commit's file still present"
+    );
     assert!(repo.join("c.txt").exists(), "later commit's file missing");
 }
 
@@ -837,8 +852,14 @@ fi
         subjects
     );
     // Both files from squashed commits should be present.
-    assert!(repo.join("b.txt").exists(), "middle's file missing after squash");
-    assert!(repo.join("c.txt").exists(), "last's file missing after squash");
+    assert!(
+        repo.join("b.txt").exists(),
+        "middle's file missing after squash"
+    );
+    assert!(
+        repo.join("c.txt").exists(),
+        "last's file missing after squash"
+    );
 }
 
 /// `git-rebase -i` with `fixup`: same tree result as squash, but the
@@ -914,7 +935,11 @@ fn git_rebase_interactive_reword() {
     run("git", &["checkout", "-b", "feat", "HEAD~1", "-q"], repo);
     fs::write(repo.join("a.txt"), "base\nfeat\n").unwrap();
     run("git", &["add", "."], repo);
-    run("git", &["commit", "-q", "-m", "feat: original message"], repo);
+    run(
+        "git",
+        &["commit", "-q", "-m", "feat: original message"],
+        repo,
+    );
 
     // Two-call editor: first rewrites the todo (pick -> reword),
     // second supplies the new commit message.
@@ -1043,10 +1068,8 @@ fn git_rebase_interactive_edit() {
     assert_eq!(code, 1, "rebase should pause with exit code 1 for edit");
 
     // State file should have paused_for_edit=true.
-    let state_json = fs::read_to_string(
-        repo.join(".git/llm-edit-rebase/state.json"),
-    )
-    .expect("state.json should exist");
+    let state_json = fs::read_to_string(repo.join(".git/llm-edit-rebase/state.json"))
+        .expect("state.json should exist");
     assert!(
         state_json.contains("\"paused_for_edit\": true")
             || state_json.contains("\"paused_for_edit\":true"),
@@ -1064,11 +1087,7 @@ fn git_rebase_interactive_edit() {
     fs::write(repo.join("b.txt"), "middle-amended\n").unwrap();
 
     // Continue the rebase.
-    run_llm_edit_with_env(
-        &["git-rebase", "--continue"],
-        repo,
-        &[],
-    );
+    run_llm_edit_with_env(&["git-rebase", "--continue"], repo, &[]);
 
     // The branch should now be fully rebased.
     let subjects = commit_subjects(repo, "feat");
@@ -1093,7 +1112,10 @@ fn git_rebase_interactive_edit() {
     );
 
     // c.txt from the last commit should still be present.
-    assert!(repo.join("c.txt").exists(), "last commit's file missing after edit+continue");
+    assert!(
+        repo.join("c.txt").exists(),
+        "last commit's file missing after edit+continue"
+    );
 }
 
 /// Dogfood guarantee: AST merge cleanly resolves two non-overlapping
@@ -1156,7 +1178,11 @@ fn git_merge_ast_resolves_disjoint_rust_function_edits() {
     assert!(merged.contains("11"), "alpha edit lost:\n{}", merged);
     assert!(merged.contains("33"), "gamma edit lost:\n{}", merged);
     // Sanity: beta untouched.
-    assert!(merged.contains("fn beta() -> i32 {\n    2\n}"), "beta corrupted:\n{}", merged);
+    assert!(
+        merged.contains("fn beta() -> i32 {\n    2\n}"),
+        "beta corrupted:\n{}",
+        merged
+    );
 }
 
 /// Recursive AST merge: two branches each add a new method to the same
@@ -1200,7 +1226,12 @@ fn git_merge_ast_recurses_into_impl_block_method_adds() {
         merged
     );
     for needed in &["fn a(&self)", "fn b(&self)", "fn c(&self)", "fn d(&self)"] {
-        assert!(merged.contains(needed), "missing method {}:\n{}", needed, merged);
+        assert!(
+            merged.contains(needed),
+            "missing method {}:\n{}",
+            needed,
+            merged
+        );
     }
 }
 
@@ -1254,6 +1285,14 @@ fn git_merge_ast_preserves_adjacent_doc_comment_and_use_spacing() {
         merged
     );
     // Both edits applied.
-    assert!(merged.contains("fn alpha() -> i32 { 11 }"), "alpha edit lost:\n{}", merged);
-    assert!(merged.contains("fn gamma() -> i32 { 3 }"), "gamma add lost:\n{}", merged);
+    assert!(
+        merged.contains("fn alpha() -> i32 { 11 }"),
+        "alpha edit lost:\n{}",
+        merged
+    );
+    assert!(
+        merged.contains("fn gamma() -> i32 { 3 }"),
+        "gamma add lost:\n{}",
+        merged
+    );
 }

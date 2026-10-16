@@ -17,7 +17,8 @@ llm-edit is **event-sourced version control on top of git**:
 3. Git history IS the op log — no external state to sync
 4. At merge time, the semantic merger compares ops instead of diffing text
 
-When two branches both rename the same symbol to different names, llm-edit produces a one-line conflict report (`rename_symbol_mismatch`) instead of a full-file diff3 conflict. **~800x token reduction** for recorded ops.
+When two branches both rename the same symbol to different names, llm-edit produces a one-line conflict report (`rename_symbol_mismatch`) instead of a full-file diff3 conflict. The recorded rename-conflict example uses roughly 800 times fewer tokens;
+this is an illustrative estimate, not a general workload guarantee.
 
 For edits without recorded ops, llm-edit falls back to AST-aware 3-way merge (splits files into named items, merges per-item) which handles most disjoint-edit cases that plain diff3 can't.
 
@@ -28,15 +29,18 @@ For edits without recorded ops, llm-edit falls back to AST-aware 3-way merge (sp
 brew install dwms/tap/llm-edit
 
 # …or clone and build from source (requires Rust toolchain)
-git clone git@github.com:dwms/llm-edit.git
+git clone https://github.com/dwms/llm-edit.git
 cd llm-edit
-cargo build --release
-cp target/release/llm-edit /usr/local/bin/
+cargo install --locked --path . --bin llm-edit --bin lint_parse
 
 # Initialize in your project
 cd your-project
 llm-edit init
 ```
+
+The v0.1.0 prebuilt archives contain only `llm-edit`. Build from source for
+the `lint_parse` helper used by the pre-commit hook. Future release archives
+include both binaries.
 
 `init` installs four git hooks (pre-commit, prepare-commit-msg, post-commit, post-merge) and adds the transient scratch file to `.gitignore`. No other workspace artifacts.
 
@@ -131,25 +135,30 @@ The git hooks handle this automatically:
 4. **post-merge**: rebuilds the llm-edit binary if source changed (dogfood protection)
 
 Ops in a commit body look like:
-```
+````
 feat: add validation helper
 
 ```llm-edit-ops
 {"op":"add_function","anchor":{"file":"src/lib.rs","path":["module"]},"after":{"kind":"function_def","name":"process"},"name":"validate","source":"fn validate() { ... }\n"}
-`` `
 ```
+````
 
 The merger reads these via `git log --format=%B base..tip` — no files to sync, no state to lose.
 
 ## Token savings
 
-Measured across 128 benchmark fixtures:
+The fixture suite measures merge behavior; token counts below include estimates
+for larger files and are not a production workload benchmark. Run
+`cargo run --locked --release --bin bench` to reproduce the merge results.
+
+Current merge benchmark and illustrative token estimates:
 
 | Metric | Value |
 |---|---|
-| Cases where llm-edit resolves but diff3 conflicts | 76/81 (94%) |
-| Avg tokens saved per fixture (small files) | ~160 |
-| Tokens saved per real 80KB file conflict | ~36,000 |
+| Fixtures passing expected merge behavior | 128/128 |
+| Fixtures passing with diff3 | 5/128 |
+| Estimated tokens saved per fixture (small files) | ~160 |
+| Estimated tokens saved for an 80KB file conflict | ~36,000 |
 | Reduction for recorded rename-vs-rename | ~800x |
 
 ## License

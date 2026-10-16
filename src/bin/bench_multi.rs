@@ -19,9 +19,9 @@
 // measurement tool, not a gate.
 
 use anyhow::{Context, Result};
+use llm_edit::load_tree;
 use llm_edit::merge_logic::{MergeResult, compare_tree, merge_trees_and_ops};
 use llm_edit::ops::{Op, parse_log};
-use llm_edit::load_tree;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -117,7 +117,6 @@ fn read_log(path: &Path) -> Result<Vec<Op>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     parse_log(&text)
 }

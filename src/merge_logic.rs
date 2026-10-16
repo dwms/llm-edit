@@ -76,7 +76,10 @@ pub enum MergeResult {
     /// Successful merge: both the resulting tree AND the merged op log
     /// (A's surviving ops followed by B's rewritten, non-idempotent ops).
     /// The log is what enables persistence across multi-generation merges.
-    Merged { tree: Tree, log: Vec<Op> },
+    Merged {
+        tree: Tree,
+        log: Vec<Op>,
+    },
     Conflicts(Vec<ConflictReport>),
 }
 
@@ -151,11 +154,7 @@ pub fn merge_case(case: &Path) -> Result<MergeResult> {
 /// Core merge: takes a base tree and two agents' op-logs, returns a
 /// `MergeResult`. Called by `merge_case` and by multi-merge harnesses
 /// that chain merges without round-tripping through disk.
-pub fn merge_trees_and_ops(
-    tree: Tree,
-    ops_a: &[Op],
-    ops_b: &[Op],
-) -> Result<MergeResult> {
+pub fn merge_trees_and_ops(tree: Tree, ops_a: &[Op], ops_b: &[Op]) -> Result<MergeResult> {
     let mut tree = tree;
     let ops_a_in = ops_a.to_vec();
     let ops_b_in = ops_b.to_vec();
@@ -338,7 +337,9 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
             // line-exact (ignoring leading whitespace / trailing newline)
             Ok(text.lines().any(|l| l.trim() == needle))
         }
-        Op::AddRule { anchor, selector, .. } => {
+        Op::AddRule {
+            anchor, selector, ..
+        } => {
             // Already applied iff the stylesheet already contains a
             // selector block starting with `<selector> {`.
             let file = anchor
@@ -392,7 +393,13 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
             // anchor's content is simply not there at all.)
             Ok(!text.contains(old.as_str()) && text.contains(new.as_str()))
         }
-        Op::RenameSymbol { respect_shadowing: false, scope, file, old, .. } => {
+        Op::RenameSymbol {
+            respect_shadowing: false,
+            scope,
+            file,
+            old,
+            ..
+        } => {
             // Already applied iff the old name is no longer visible in the
             // scope the op would rewrite. The underlying applier is itself
             // idempotent (no-match → no-op), but declaring the skip here
@@ -418,7 +425,9 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
                 }
             }))
         }
-        Op::RetypeBinding { anchor, from, to, .. } => {
+        Op::RetypeBinding {
+            anchor, from, to, ..
+        } => {
             // Already applied iff the file no longer has the `from`
             // declaration for this variable and already has `to`.
             let file = anchor
@@ -436,7 +445,9 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
             let to_needle = format!("{} {}", to, variable);
             Ok(!text.contains(&from_needle) && text.contains(&to_needle))
         }
-        Op::ExtractFunction { source, new_name, .. } => {
+        Op::ExtractFunction {
+            source, new_name, ..
+        } => {
             // Already applied iff the destination helper already exists
             // in the file — which is how the extract applier leaves things.
             let file = source
@@ -500,20 +511,25 @@ fn op_is_noop_against(op: &Op, tree: &Tree) -> Result<bool> {
                 None => Ok(false),
             }
         }
-        Op::DeleteFile { file } => {
-            Ok(!tree.contains_key(&PathBuf::from(file)))
-        }
+        Op::DeleteFile { file } => Ok(!tree.contains_key(&PathBuf::from(file))),
         Op::MoveFile { from, to } => {
             Ok(!tree.contains_key(&PathBuf::from(from)) && tree.contains_key(&PathBuf::from(to)))
         }
-        Op::ChangeSignature { file, fn_name, add_params, remove_params } => {
+        Op::ChangeSignature {
+            file,
+            fn_name,
+            add_params,
+            remove_params,
+        } => {
             let Some(text) = tree.get(&PathBuf::from(file)) else {
                 return Ok(false);
             };
             // Already applied iff all add_params are present in the
             // signature AND all remove_params are absent.
             let sig_start = text.find(&format!("{}(", fn_name));
-            let Some(sig_start) = sig_start else { return Ok(false); };
+            let Some(sig_start) = sig_start else {
+                return Ok(false);
+            };
             let rest = &text[sig_start..];
             let sig_end = rest.find(')').unwrap_or(rest.len());
             let sig = &rest[..sig_end];
@@ -602,12 +618,28 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     let mut out = Vec::new();
 
     for a in ops_a {
-        if let Op::RenameSymbol { respect_shadowing: false, scope: a_scope, file: a_file, old: a_old, new: a_new, .. } = a {
+        if let Op::RenameSymbol {
+            respect_shadowing: false,
+            scope: a_scope,
+            file: a_file,
+            old: a_old,
+            new: a_new,
+            ..
+        } = a
+        {
             if a_scope != "module" {
                 continue;
             }
             for b in ops_b {
-                if let Op::RenameSymbol { respect_shadowing: false, scope: b_scope, file: b_file, old: b_old, new: b_new, .. } = b {
+                if let Op::RenameSymbol {
+                    respect_shadowing: false,
+                    scope: b_scope,
+                    file: b_file,
+                    old: b_old,
+                    new: b_new,
+                    ..
+                } = b
+                {
                     if b_scope == "module" && a_file == b_file && a_old == b_old && a_new != b_new {
                         out.push(ConflictReport::RenameSymbolMismatch {
                             file: a_file.clone(),
@@ -623,7 +655,11 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
 
     for a in ops_a {
         if let Op::DeleteFunction { anchor } = a {
-            let file = anchor.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let fn_name = extract_fn_name_from_path(anchor).ok();
             if let Some(fn_name) = fn_name {
                 for b in ops_b {
@@ -639,7 +675,11 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     }
     for b in ops_b {
         if let Op::DeleteFunction { anchor } = b {
-            let file = anchor.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let file = anchor
+                .get("file")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let fn_name = extract_fn_name_from_path(anchor).ok();
             if let Some(fn_name) = fn_name {
                 for a in ops_a {
@@ -655,15 +695,33 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     }
 
     for a in ops_a {
-        if let Op::ReplaceInAnchor { anchor: a_anc, old: a_old, new: a_new } = a {
-            let a_file = a_anc.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        if let Op::ReplaceInAnchor {
+            anchor: a_anc,
+            old: a_old,
+            new: a_new,
+        } = a
+        {
+            let a_file = a_anc
+                .get("file")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let a_fn = match extract_fn_name_from_path(a_anc) {
                 Ok(n) => n,
                 Err(_) => continue,
             };
             for b in ops_b {
-                if let Op::ReplaceInAnchor { anchor: b_anc, old: b_old, new: b_new } = b {
-                    let b_file = b_anc.get("file").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if let Op::ReplaceInAnchor {
+                    anchor: b_anc,
+                    old: b_old,
+                    new: b_new,
+                } = b
+                {
+                    let b_file = b_anc
+                        .get("file")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let b_fn = match extract_fn_name_from_path(b_anc) {
                         Ok(n) => n,
                         Err(_) => continue,
@@ -684,12 +742,22 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
 
     // rename_css_class disagreement: same old, different new.
     for a in ops_a {
-        if let Op::RenameCssClass { scope: a_scope, old: a_old, new: a_new } = a {
+        if let Op::RenameCssClass {
+            scope: a_scope,
+            old: a_old,
+            new: a_new,
+        } = a
+        {
             if a_scope != "project" {
                 continue;
             }
             for b in ops_b {
-                if let Op::RenameCssClass { scope: b_scope, old: b_old, new: b_new } = b {
+                if let Op::RenameCssClass {
+                    scope: b_scope,
+                    old: b_old,
+                    new: b_new,
+                } = b
+                {
                     if b_scope == "project" && a_old == b_old && a_new != b_new {
                         out.push(ConflictReport::RenameCssClassMismatch {
                             old: a_old.clone(),
@@ -704,11 +772,19 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
 
     // wrap_element disagreement: same file+selector, different wrapper.
     for a in ops_a {
-        if let Op::WrapElement { anchor: a_anc, wrapper: a_w } = a {
+        if let Op::WrapElement {
+            anchor: a_anc,
+            wrapper: a_w,
+        } = a
+        {
             let a_file = a_anc.get("file").and_then(|v| v.as_str()).unwrap_or("");
             let a_sel = a_anc.get("selector").and_then(|v| v.as_str()).unwrap_or("");
             for b in ops_b {
-                if let Op::WrapElement { anchor: b_anc, wrapper: b_w } = b {
+                if let Op::WrapElement {
+                    anchor: b_anc,
+                    wrapper: b_w,
+                } = b
+                {
                     let b_file = b_anc.get("file").and_then(|v| v.as_str()).unwrap_or("");
                     let b_sel = b_anc.get("selector").and_then(|v| v.as_str()).unwrap_or("");
                     if a_file == b_file && a_sel == b_sel && a_w != b_w {
@@ -728,7 +804,14 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     // conflict unless the op explicitly asked to drop on violation.
     let b_reassigns = variables_reassigned_by(ops_b);
     for a in ops_a {
-        if let Op::RetypeBinding { anchor, from, to, precondition, on_violation } = a {
+        if let Op::RetypeBinding {
+            anchor,
+            from,
+            to,
+            precondition,
+            on_violation,
+        } = a
+        {
             let wants_unreassigned =
                 precondition.get("reassigned").and_then(|v| v.as_bool()) == Some(false);
             if !wants_unreassigned || on_violation == "drop" {
@@ -758,7 +841,14 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     // Same check, symmetric: B's retype invalidated by A's reassignment.
     let a_reassigns = variables_reassigned_by(ops_a);
     for b in ops_b {
-        if let Op::RetypeBinding { anchor, from, to, precondition, on_violation } = b {
+        if let Op::RetypeBinding {
+            anchor,
+            from,
+            to,
+            precondition,
+            on_violation,
+        } = b
+        {
             let wants_unreassigned =
                 precondition.get("reassigned").and_then(|v| v.as_bool()) == Some(false);
             if !wants_unreassigned || on_violation == "drop" {
@@ -787,44 +877,43 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     }
 
     // delete_function vs new caller that references the deleted name.
-    let check_delete_vs_caller =
-        |del_ops: &[Op], add_ops: &[Op], out: &mut Vec<ConflictReport>| {
-            for a in del_ops {
-                if let Op::DeleteFunction { anchor } = a {
-                    let file = anchor
-                        .get("file")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let deleted = match extract_fn_name_from_path(anchor) {
-                        Ok(n) => n,
-                        Err(_) => continue,
-                    };
-                    for b in add_ops {
-                        if let Op::AddFunction {
-                            anchor: _b_anc,
-                            name,
-                            source,
-                            ..
-                        } = b
-                        {
-                            // Cross-file: a new caller in any file referencing
-                            // the deleted name still constitutes a conflict.
-                            // Word-boundary match on the name, then confirm a
-                            // `(` follows to avoid false positives like
-                            // `legacy_handler(` matching a deleted `legacy`.
-                            if contains_word_call(source, &deleted) {
-                                out.push(ConflictReport::DeleteVsNewCaller {
-                                    file: file.clone(),
-                                    deleted: deleted.clone(),
-                                    caller: name.clone(),
-                                });
-                            }
+    let check_delete_vs_caller = |del_ops: &[Op], add_ops: &[Op], out: &mut Vec<ConflictReport>| {
+        for a in del_ops {
+            if let Op::DeleteFunction { anchor } = a {
+                let file = anchor
+                    .get("file")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let deleted = match extract_fn_name_from_path(anchor) {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                for b in add_ops {
+                    if let Op::AddFunction {
+                        anchor: _b_anc,
+                        name,
+                        source,
+                        ..
+                    } = b
+                    {
+                        // Cross-file: a new caller in any file referencing
+                        // the deleted name still constitutes a conflict.
+                        // Word-boundary match on the name, then confirm a
+                        // `(` follows to avoid false positives like
+                        // `legacy_handler(` matching a deleted `legacy`.
+                        if contains_word_call(source, &deleted) {
+                            out.push(ConflictReport::DeleteVsNewCaller {
+                                file: file.clone(),
+                                deleted: deleted.clone(),
+                                caller: name.clone(),
+                            });
                         }
                     }
                 }
             }
-        };
+        }
+    };
     check_delete_vs_caller(ops_a, ops_b, &mut out);
     check_delete_vs_caller(ops_b, ops_a, &mut out);
 
@@ -873,7 +962,8 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
     let check_rename_vs_delete =
         |rename_ops: &[Op], delete_ops: &[Op], out: &mut Vec<ConflictReport>| {
             for a in rename_ops {
-                if let Op::RenameSymbol { respect_shadowing: false,
+                if let Op::RenameSymbol {
+                    respect_shadowing: false,
                     scope,
                     file: r_file,
                     old,
@@ -907,9 +997,17 @@ fn detect_conflicts(ops_a: &[Op], ops_b: &[Op]) -> Vec<ConflictReport> {
 
     // add_file on the same path with different content.
     for a in ops_a {
-        if let Op::AddFile { file: a_file, content: a_content } = a {
+        if let Op::AddFile {
+            file: a_file,
+            content: a_content,
+        } = a
+        {
             for b in ops_b {
-                if let Op::AddFile { file: b_file, content: b_content } = b {
+                if let Op::AddFile {
+                    file: b_file,
+                    content: b_content,
+                } = b
+                {
                     if a_file == b_file && a_content != b_content {
                         out.push(ConflictReport::AddFileMismatch {
                             file: a_file.clone(),
@@ -1040,14 +1138,18 @@ fn variables_reassigned_by(ops: &[Op]) -> HashSet<String> {
 /// `drop`. The `conflict` policy is handled by `detect_conflicts` above,
 /// which emits a `RetypePreconditionViolated` report instead.
 fn retype_invalidated_by_b(op: &Op, b_reassigns: &HashSet<String>) -> bool {
-    if let Op::RetypeBinding { anchor, precondition, on_violation, .. } = op {
+    if let Op::RetypeBinding {
+        anchor,
+        precondition,
+        on_violation,
+        ..
+    } = op
+    {
         if on_violation != "drop" {
             return false; // conflict path is handled by detect_conflicts
         }
-        let wants_unreassigned = precondition
-            .get("reassigned")
-            .and_then(|v| v.as_bool())
-            == Some(false);
+        let wants_unreassigned =
+            precondition.get("reassigned").and_then(|v| v.as_bool()) == Some(false);
         if !wants_unreassigned {
             return false;
         }
@@ -1064,20 +1166,35 @@ fn collect_rewrites(ops: &[Op], base_tree: &Tree) -> Result<Rewrites> {
     let mut r = Rewrites::default();
     for op in ops {
         match op {
-            Op::RenameSymbol { respect_shadowing: false, scope, file, old, new, .. } if scope == "module" => {
+            Op::RenameSymbol {
+                respect_shadowing: false,
+                scope,
+                file,
+                old,
+                new,
+                ..
+            } if scope == "module" => {
                 r.symbol_renames.push(SymbolRename {
                     file: file.clone(),
                     old: old.clone(),
                     new: new.clone(),
                 });
             }
-            Op::RenameSymbol { respect_shadowing: false, scope, old, new, .. } if scope == "project" => {
+            Op::RenameSymbol {
+                respect_shadowing: false,
+                scope,
+                old,
+                new,
+                ..
+            } if scope == "project" => {
                 r.project_symbol_renames.push((old.clone(), new.clone()));
             }
             Op::RenameCssClass { scope, old, new } if scope == "project" => {
                 r.class_renames.push((old.clone(), new.clone()));
             }
-            Op::RetypeBinding { anchor, from, to, .. } => {
+            Op::RetypeBinding {
+                anchor, from, to, ..
+            } => {
                 let file = anchor
                     .get("file")
                     .and_then(|v| v.as_str())
@@ -1098,7 +1215,11 @@ fn collect_rewrites(ops: &[Op], base_tree: &Tree) -> Result<Rewrites> {
                 }
             }
             Op::ExtractFunction {
-                source, body_range, new_name, moved_text: serialized_moved, ..
+                source,
+                body_range,
+                new_name,
+                moved_text: serialized_moved,
+                ..
             } => {
                 let file = source
                     .get("file")
@@ -1211,7 +1332,12 @@ fn snapshot_fn_body_stmts(text: &str, fn_name: &str, range: [usize; 2]) -> Resul
 
 fn rewrite_b_op(op: Op, r: &Rewrites) -> Result<Op> {
     Ok(match op {
-        Op::AddFunction { anchor, after, name, source } => {
+        Op::AddFunction {
+            anchor,
+            after,
+            name,
+            source,
+        } => {
             let file = anchor
                 .get("file")
                 .and_then(|v| v.as_str())
@@ -1234,9 +1360,18 @@ fn rewrite_b_op(op: Op, r: &Rewrites) -> Result<Op> {
                     }
                 }
             }
-            Op::AddFunction { anchor, after, name, source }
+            Op::AddFunction {
+                anchor,
+                after,
+                name,
+                source,
+            }
         }
-        Op::InsertElement { anchor, position, html } => {
+        Op::InsertElement {
+            anchor,
+            position,
+            html,
+        } => {
             let mut html = html;
             for (old, new) in &r.class_renames {
                 html = rename_html_class_attr(&html, old, new);
@@ -1244,7 +1379,11 @@ fn rewrite_b_op(op: Op, r: &Rewrites) -> Result<Op> {
             for (old, new) in &r.project_symbol_renames {
                 html = rename_word_boundary(&html, old, new);
             }
-            Op::InsertElement { anchor, position, html }
+            Op::InsertElement {
+                anchor,
+                position,
+                html,
+            }
         }
         Op::ReplaceInAnchor { anchor, old, new } => {
             let file = anchor
@@ -1272,14 +1411,26 @@ fn rewrite_b_op(op: Op, r: &Rewrites) -> Result<Op> {
             }
             Op::ReplaceInAnchor { anchor, old, new }
         }
-        Op::AddRule { anchor, selector, declarations } => {
+        Op::AddRule {
+            anchor,
+            selector,
+            declarations,
+        } => {
             let mut selector = selector;
             for (old, new) in &r.class_renames {
                 selector = rename_css_selector_class(&selector, old, new);
             }
-            Op::AddRule { anchor, selector, declarations }
+            Op::AddRule {
+                anchor,
+                selector,
+                declarations,
+            }
         }
-        Op::InsertAfter { anchor, content, reassigns } => {
+        Op::InsertAfter {
+            anchor,
+            content,
+            reassigns,
+        } => {
             let file = anchor
                 .get("file")
                 .and_then(|v| v.as_str())
@@ -1377,7 +1528,11 @@ fn rewrite_b_op(op: Op, r: &Rewrites) -> Result<Op> {
                 }
             }
 
-            Op::InsertAfter { anchor, content, reassigns }
+            Op::InsertAfter {
+                anchor,
+                content,
+                reassigns,
+            }
         }
         other => other,
     })
@@ -1428,7 +1583,10 @@ fn retarget_fn_name(anchor: &serde_json::Value, new_name: &str) -> Result<serde_
     for seg in path.iter_mut() {
         if let Some(obj) = seg.as_object_mut() {
             if obj.get("kind").and_then(|x| x.as_str()) == Some("function_def") {
-                obj.insert("name".to_string(), serde_json::Value::String(new_name.to_string()));
+                obj.insert(
+                    "name".to_string(),
+                    serde_json::Value::String(new_name.to_string()),
+                );
                 return Ok(v);
             }
         }
@@ -1526,7 +1684,8 @@ mod idempotence_tests {
     #[test]
     fn rename_symbol_module_skipped_when_old_name_gone() {
         let tree = tree_of(&[("db.py", "def connect():\n    pass\n")]);
-        let op = Op::RenameSymbol { respect_shadowing: false,
+        let op = Op::RenameSymbol {
+            respect_shadowing: false,
             scope: "module".into(),
             file: "db.py".into(),
             old: "get_conn".into(),
@@ -1539,7 +1698,8 @@ mod idempotence_tests {
     #[test]
     fn rename_symbol_module_applied_when_old_name_present() {
         let tree = tree_of(&[("db.py", "def get_conn():\n    pass\n")]);
-        let op = Op::RenameSymbol { respect_shadowing: false,
+        let op = Op::RenameSymbol {
+            respect_shadowing: false,
             scope: "module".into(),
             file: "db.py".into(),
             old: "get_conn".into(),

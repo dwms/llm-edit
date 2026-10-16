@@ -46,7 +46,14 @@ pub fn apply_log(tree: &mut Tree, ops: &[Op]) -> Result<()> {
 
 fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
     match op {
-        Op::RenameSymbol { scope, file, old, new, respect_shadowing, .. } => {
+        Op::RenameSymbol {
+            scope,
+            file,
+            old,
+            new,
+            respect_shadowing,
+            ..
+        } => {
             match scope.as_str() {
                 "module" => {
                     let path = PathBuf::from(file);
@@ -69,23 +76,36 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
             propagate_css_class_rename(tree, old, new);
             Ok(())
         }
-        Op::AddFunction { anchor, after, source, .. } => {
+        Op::AddFunction {
+            anchor,
+            after,
+            source,
+            ..
+        } => {
             let file = anchor_file(anchor)?;
             let after_name = after
                 .get("name")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("add_function.after.name missing"))?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = insert_function_after(text, after_name, source)?;
             Ok(())
         }
-        Op::InsertElement { anchor, position, html } => {
+        Op::InsertElement {
+            anchor,
+            position,
+            html,
+        } => {
             let file = anchor_file(anchor)?;
             let selector = anchor
                 .get("selector")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("insert_element.anchor.selector missing"))?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             match (selector, position.as_str()) {
                 ("body", "last-child") => {
                     *text = insert_html_before_body_close(text, html);
@@ -96,7 +116,8 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
                 _ => {
                     return Err(anyhow!(
                         "v0 insert_element: unsupported selector={} position={}",
-                        selector, position
+                        selector,
+                        position
                     ));
                 }
             }
@@ -112,13 +133,17 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
         } => {
             let file = anchor_file(source)?;
             let fn_name = anchor_path_fn_name(source)?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = extract_function(text, &fn_name, *body_range, new_name, params, returns)?;
             Ok(())
         }
         Op::DeleteNode { anchor } => {
             let file = anchor_file(anchor)?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             // New content-hash anchor form: {file, node_id, parent_fn, text}.
             // The applier locates the matching comment by (parent_fn, normalized text)
             // regardless of its positional index in the fn body. This survives
@@ -147,7 +172,9 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
         }
         Op::ReplaceInAnchor { anchor, old, new } => {
             let file = anchor_file(anchor)?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             if anchor.get("selector").is_some() {
                 // HTML/CSS selector anchor: v0 does a file-wide substring
                 // replace. Fine for our fixtures where `old` is unique.
@@ -164,9 +191,9 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
                 *text = replace_in_fn_body(text, &fn_name, old, new)?;
             } else {
                 // File-scoped replace (no function in anchor path).
-                let pos = text
-                    .find(old.as_str())
-                    .ok_or_else(|| anyhow!("replace_in_anchor (file-scoped): `{}` not found", old))?;
+                let pos = text.find(old.as_str()).ok_or_else(|| {
+                    anyhow!("replace_in_anchor (file-scoped): `{}` not found", old)
+                })?;
                 let mut out = String::with_capacity(text.len() + new.len());
                 out.push_str(&text[..pos]);
                 out.push_str(new);
@@ -175,9 +202,15 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
             }
             Ok(())
         }
-        Op::AddRule { anchor, selector, declarations } => {
+        Op::AddRule {
+            anchor,
+            selector,
+            declarations,
+        } => {
             let file = anchor_file(anchor)?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = append_css_rule(text, selector, declarations);
             Ok(())
         }
@@ -186,13 +219,17 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
                 return Err(anyhow!("sort_block v0 only supports key=alphabetic"));
             }
             let file = anchor_file(anchor)?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = sort_imports_alphabetic(text);
             Ok(())
         }
         Op::AddImport { anchor, module } => {
             let file = anchor_file(anchor)?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = add_import_smart(text, module);
             Ok(())
         }
@@ -202,34 +239,46 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
                 .get("selector")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("wrap_element.anchor.selector missing"))?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = wrap_element_children(text, selector, wrapper)?;
             Ok(())
         }
-        Op::RetypeBinding { anchor, from, to, .. } => {
+        Op::RetypeBinding {
+            anchor, from, to, ..
+        } => {
             let file = anchor_file(anchor)?;
             let variable = anchor
                 .get("variable")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("retype_binding.anchor.variable missing"))?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = retype_binding_textual(text, variable, from, to)?;
             Ok(())
         }
         Op::DeleteFunction { anchor } => {
             let file = anchor_file(anchor)?;
             let fn_name = anchor_path_fn_name(anchor)?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = delete_top_level_fn(text, &fn_name)?;
             Ok(())
         }
-        Op::InsertAfter { anchor, content, .. } => {
+        Op::InsertAfter {
+            anchor, content, ..
+        } => {
             let file = anchor_file(anchor)?;
             let needle = anchor
                 .get("after_line_contains")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("insert_after.anchor.after_line_contains missing"))?;
-            let text = tree.get_mut(&file).ok_or_else(|| anyhow!("no such file {}", file.display()))?;
+            let text = tree
+                .get_mut(&file)
+                .ok_or_else(|| anyhow!("no such file {}", file.display()))?;
             *text = insert_line_after_matching(text, needle, content)?;
             Ok(())
         }
@@ -251,7 +300,8 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
         Op::MoveFile { from, to } => {
             let from_path = PathBuf::from(from);
             let to_path = PathBuf::from(to);
-            let content = tree.remove(&from_path)
+            let content = tree
+                .remove(&from_path)
                 .ok_or_else(|| anyhow!("move_file: {} not found", from))?;
             if tree.contains_key(&to_path) {
                 return Err(anyhow!("move_file: target {} already exists", to));
@@ -259,9 +309,15 @@ fn apply_op(tree: &mut Tree, op: &Op) -> Result<()> {
             tree.insert(to_path, content);
             Ok(())
         }
-        Op::ChangeSignature { file, fn_name, add_params, remove_params } => {
+        Op::ChangeSignature {
+            file,
+            fn_name,
+            add_params,
+            remove_params,
+        } => {
             let path = PathBuf::from(file);
-            let text = tree.get_mut(&path)
+            let text = tree
+                .get_mut(&path)
                 .ok_or_else(|| anyhow!("change_signature: {} not found", file))?;
             *text = change_fn_signature(text, fn_name, add_params, remove_params)?;
             Ok(())
@@ -281,7 +337,10 @@ fn change_fn_signature(
     // Find `fn_name(` — the opening paren of the function signature.
     let needle = format!("{}(", fn_name);
     let Some(name_pos) = source.find(&needle) else {
-        return Err(anyhow!("change_signature: function `{}` not found", fn_name));
+        return Err(anyhow!(
+            "change_signature: function `{}` not found",
+            fn_name
+        ));
     };
     let open = name_pos + fn_name.len(); // position of `(`
     // Find matching `)` — simple scan (no nested parens in param lists
@@ -308,7 +367,10 @@ fn change_fn_signature(
     let mut params: Vec<String> = if params_str.trim().is_empty() {
         Vec::new()
     } else {
-        params_str.split(',').map(|p| p.trim().to_string()).collect()
+        params_str
+            .split(',')
+            .map(|p| p.trim().to_string())
+            .collect()
     };
     // Remove params by name (match the param name, which is the part
     // before `:` for typed langs or the whole token for Python).
@@ -557,11 +619,7 @@ fn collect_identifier_hits(
 /// bare `identifier`, `typed_parameter`, `default_parameter`,
 /// `typed_default_parameter`, `list_splat_pattern` (*args), and
 /// `dictionary_splat_pattern` (**kwargs).
-fn python_function_shadows(
-    fn_node: tree_sitter::Node,
-    source: &[u8],
-    old: &[u8],
-) -> bool {
+fn python_function_shadows(fn_node: tree_sitter::Node, source: &[u8], old: &[u8]) -> bool {
     let Some(params) = fn_node.child_by_field_name("parameters") else {
         return false;
     };
@@ -602,12 +660,7 @@ fn python_function_shadows(
 ///   - `"tsx"` → tree-sitter-typescript (TSX grammar)
 ///
 /// Unknown extensions return `source` unchanged.
-pub fn js_ts_ast_rename_identifier(
-    source: &str,
-    ext: &str,
-    old: &str,
-    new: &str,
-) -> String {
+pub fn js_ts_ast_rename_identifier(source: &str, ext: &str, old: &str, new: &str) -> String {
     let lang: tree_sitter::Language = match ext {
         "js" | "jsx" | "mjs" | "cjs" => tree_sitter_javascript::LANGUAGE.into(),
         "ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
@@ -683,7 +736,7 @@ fn collect_rust_identifier_hits(
             | "field_identifier"
             | "type_identifier"
             | "shorthand_field_identifier"
-            | "primitive_type"  // matches when renaming e.g. type aliases
+            | "primitive_type" // matches when renaming e.g. type aliases
     );
     // Don't recurse into string / comment subtrees — their internal
     // node kinds may include identifier-shaped nodes (e.g. a macro
@@ -760,8 +813,7 @@ pub fn rename_word_boundary(text: &str, old: &str, new: &str) -> String {
         if bytes[i..].starts_with(old_bytes) {
             let before_ok = i == 0 || !is_ident_char(bytes[i - 1] as char);
             let after_i = i + old_bytes.len();
-            let after_ok =
-                after_i >= bytes.len() || !is_ident_char(bytes[after_i] as char);
+            let after_ok = after_i >= bytes.len() || !is_ident_char(bytes[after_i] as char);
             if before_ok && after_ok {
                 out.push_str(new);
                 i = after_i;
@@ -780,7 +832,10 @@ pub fn rename_css_selector_class(text: &str, old: &str, new: &str) -> String {
     // whose class_name matches `old`, rewrite only those. Leaves comments,
     // strings (`content: ".old"`), and non-matching selectors untouched.
     let mut parser = tree_sitter::Parser::new();
-    if parser.set_language(&tree_sitter_css::LANGUAGE.into()).is_err() {
+    if parser
+        .set_language(&tree_sitter_css::LANGUAGE.into())
+        .is_err()
+    {
         // Fallback to text-based rename if parser setup fails.
         return rename_css_selector_class_text(text, old, new);
     }
@@ -1132,7 +1187,10 @@ fn extract_function(
 
     let [lo, hi] = body_range;
     if hi >= stmt_ranges.len() {
-        return Err(anyhow!("body_range out of bounds: {} statements present", stmt_ranges.len()));
+        return Err(anyhow!(
+            "body_range out of bounds: {} statements present",
+            stmt_ranges.len()
+        ));
     }
     let extract_start = stmt_ranges[lo].0;
     let extract_end_excl = stmt_ranges[hi].1 + 1;
@@ -1452,12 +1510,9 @@ fn replace_in_fn_body(text: &str, fn_name: &str, old: &str, new: &str) -> Result
     let body: String = lines[def_idx + 1..body_end].concat();
     let after: String = lines[body_end..].concat();
 
-    let pos = body.find(old).ok_or_else(|| {
-        anyhow!(
-            "old substring `{}` not found in body of `{}`",
-            old, fn_name
-        )
-    })?;
+    let pos = body
+        .find(old)
+        .ok_or_else(|| anyhow!("old substring `{}` not found in body of `{}`", old, fn_name))?;
     let mut rebuilt_body = String::with_capacity(body.len() + new.len());
     rebuilt_body.push_str(&body[..pos]);
     rebuilt_body.push_str(new);
@@ -1474,13 +1529,13 @@ fn replace_in_fn_body(text: &str, fn_name: &str, old: &str, new: &str) -> Result
 const SKIP_DIRS: &[&str] = &[
     ".git",
     ".llm-edit",
-    "target",         // Rust / Cargo
-    "node_modules",   // Node / npm / pnpm
-    "__pycache__",    // Python bytecode
-    ".venv",          // Python virtualenvs
+    "target",       // Rust / Cargo
+    "node_modules", // Node / npm / pnpm
+    "__pycache__",  // Python bytecode
+    ".venv",        // Python virtualenvs
     "venv",
     ".tox",
-    "build",          // generic build output
+    "build", // generic build output
     "dist",
 ];
 

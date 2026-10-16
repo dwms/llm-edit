@@ -120,8 +120,8 @@ struct RebaseState {
 /// Apply a single op (parsed from JSON) against `cwd`, write changed files
 /// back to disk, and append the op to `cwd/.llm-edit/log.jsonl`.
 pub fn apply_op_json(cwd: &Path, op_json: &str) -> Result<()> {
-    let op: Op = serde_json::from_str(op_json)
-        .with_context(|| format!("parse op JSON: {}", op_json))?;
+    let op: Op =
+        serde_json::from_str(op_json).with_context(|| format!("parse op JSON: {}", op_json))?;
     let mut tree = load_tree(cwd)?;
     let before = tree.clone();
     apply_log(&mut tree, &[op])?;
@@ -132,8 +132,7 @@ pub fn apply_op_json(cwd: &Path, op_json: &str) -> Result<()> {
             if let Some(parent) = abs.parent() {
                 std::fs::create_dir_all(parent).ok();
             }
-            std::fs::write(&abs, text)
-                .with_context(|| format!("write {}", abs.display()))?;
+            std::fs::write(&abs, text).with_context(|| format!("write {}", abs.display()))?;
         }
     }
     // Delete files that were removed from the tree (delete_file, move_file).
@@ -141,8 +140,7 @@ pub fn apply_op_json(cwd: &Path, op_json: &str) -> Result<()> {
         if !tree.contains_key(rel) {
             let abs = cwd.join(rel);
             if abs.exists() {
-                std::fs::remove_file(&abs)
-                    .with_context(|| format!("delete {}", abs.display()))?;
+                std::fs::remove_file(&abs).with_context(|| format!("delete {}", abs.display()))?;
             }
         }
     }
@@ -168,7 +166,10 @@ pub fn merge_worktrees(base: &Path, ours: &Path, theirs: &Path, output: &Path) -
                 body.push('\n');
             }
             std::fs::write(output.join(".llm-edit/conflicts.txt"), body)?;
-            Err(anyhow!("semantic merge conflict: {} report(s)", reports.len()))
+            Err(anyhow!(
+                "semantic merge conflict: {} report(s)",
+                reports.len()
+            ))
         }
     }
 }
@@ -178,8 +179,8 @@ fn read_agent_log(dir: &Path) -> Result<Vec<Op>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     parse_log(&text)
 }
 
@@ -269,8 +270,7 @@ fn write_output(output: &Path, tree: &Tree, log: &[Op]) -> Result<()> {
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&abs, text)
-            .with_context(|| format!("write {}", abs.display()))?;
+        std::fs::write(&abs, text).with_context(|| format!("write {}", abs.display()))?;
     }
     let log_dir = output.join(".llm-edit");
     std::fs::create_dir_all(&log_dir)?;
@@ -364,14 +364,20 @@ pub fn run_infer() -> Result<(usize, usize)> {
                 // Modified file — run the existing pattern detectors.
                 let path = std::path::PathBuf::from(rel);
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                if !matches!(ext, "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "rs") {
+                if !matches!(
+                    ext,
+                    "py" | "js" | "jsx" | "mjs" | "cjs" | "ts" | "tsx" | "rs"
+                ) {
                     skipped += 1;
                     println!("  skip  {}  (no grammar for .{})", rel, ext);
                     continue;
                 }
                 let before = match git_cmd(&["show", &format!("HEAD:{}", rel)]) {
                     Ok(s) => s,
-                    Err(_) => { skipped += 1; continue; }
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
                 };
                 let after = std::fs::read_to_string(repo_root.join(rel))
                     .with_context(|| format!("read {}", rel))?;
@@ -406,9 +412,11 @@ pub fn run_infer() -> Result<(usize, usize)> {
                 if !fn_kind.is_empty() {
                     for op in infer_structural_patterns(rel, ext, &before, &after, fn_kind)? {
                         let label = match &op {
-                            serde_json::Value::Object(o) => {
-                                o.get("op").and_then(|v| v.as_str()).unwrap_or("op").to_string()
-                            }
+                            serde_json::Value::Object(o) => o
+                                .get("op")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("op")
+                                .to_string(),
                             _ => "op".to_string(),
                         };
                         let parsed: Op = serde_json::from_value(op)?;
@@ -430,11 +438,16 @@ pub fn run_infer() -> Result<(usize, usize)> {
                     while residual != after {
                         match infer_file_level_change(rel, &residual, &after) {
                             Some(op_val) => {
-                                let label = op_val.get("op").and_then(|v| v.as_str()).unwrap_or("op").to_string();
+                                let label = op_val
+                                    .get("op")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("op")
+                                    .to_string();
                                 // "Apply" the op conceptually so the next
                                 // iteration sees the remaining diff.
                                 if let Some(old) = op_val.get("old").and_then(|v| v.as_str()) {
-                                    let new = op_val.get("new").and_then(|v| v.as_str()).unwrap_or("");
+                                    let new =
+                                        op_val.get("new").and_then(|v| v.as_str()).unwrap_or("");
                                     if let Some(pos) = residual.find(old) {
                                         let mut applied = String::with_capacity(residual.len());
                                         applied.push_str(&residual[..pos]);
@@ -444,18 +457,28 @@ pub fn run_infer() -> Result<(usize, usize)> {
                                     } else {
                                         residual = after.clone(); // give up
                                     }
-                                } else if let Some(needle) = op_val.get("anchor")
+                                } else if let Some(needle) = op_val
+                                    .get("anchor")
                                     .and_then(|a| a.get("after_line_contains"))
                                     .and_then(|v| v.as_str())
                                 {
                                     // insert_after: find the anchor line
                                     // and insert content after it.
-                                    let content = op_val.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                                    if let Some(line_end) = residual.find(needle).and_then(|p| residual[p..].find('\n').map(|o| p + o)) {
-                                        let mut applied = String::with_capacity(residual.len() + content.len());
+                                    let content = op_val
+                                        .get("content")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if let Some(line_end) = residual
+                                        .find(needle)
+                                        .and_then(|p| residual[p..].find('\n').map(|o| p + o))
+                                    {
+                                        let mut applied =
+                                            String::with_capacity(residual.len() + content.len());
                                         applied.push_str(&residual[..line_end + 1]);
                                         applied.push_str(content);
-                                        if !content.ends_with('\n') { applied.push('\n'); }
+                                        if !content.ends_with('\n') {
+                                            applied.push('\n');
+                                        }
                                         applied.push_str(&residual[line_end + 1..]);
                                         residual = applied;
                                     } else {
@@ -544,7 +567,11 @@ fn infer_rename_for(ext: &str, before: &str, after: &str) -> Option<(String, Str
     }
     let mut before_idents: Vec<String> = Vec::new();
     let mut after_idents: Vec<String> = Vec::new();
-    collect_all_identifiers(before_tree.root_node(), before.as_bytes(), &mut before_idents);
+    collect_all_identifiers(
+        before_tree.root_node(),
+        before.as_bytes(),
+        &mut before_idents,
+    );
     collect_all_identifiers(after_tree.root_node(), after.as_bytes(), &mut after_idents);
 
     use std::collections::HashSet;
@@ -631,8 +658,11 @@ fn infer_structural_patterns(
     }
 
     // add_function: in after, missing from before.
-    let after_fn_index: HashMap<&str, usize> =
-        after_fns.iter().enumerate().map(|(i, f)| (f.name.as_str(), i)).collect();
+    let after_fn_index: HashMap<&str, usize> = after_fns
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (f.name.as_str(), i))
+        .collect();
     for f in &after_fns {
         if before_names.contains(f.name.as_str()) {
             continue;
@@ -816,8 +846,7 @@ fn top_level_fns(root: tree_sitter::Node, source: &[u8], fn_kind: &str) -> Vec<T
             Ok(s) => s.to_string(),
             Err(_) => continue,
         };
-        let full_source = match std::str::from_utf8(&source[child.start_byte()..child.end_byte()])
-        {
+        let full_source = match std::str::from_utf8(&source[child.start_byte()..child.end_byte()]) {
             Ok(s) => {
                 if s.ends_with('\n') {
                     s.to_string()
@@ -834,7 +863,11 @@ fn top_level_fns(root: tree_sitter::Node, source: &[u8], fn_kind: &str) -> Vec<T
             },
             None => String::new(),
         };
-        out.push(TopFn { name, source: full_source, body });
+        out.push(TopFn {
+            name,
+            source: full_source,
+            body,
+        });
     }
     out
 }
@@ -850,7 +883,10 @@ fn python_simple_imports(text: &str) -> Vec<String> {
             let rest = &t[7..];
             // Skip `as` aliases and dotted imports — keep it simple: take
             // the first token.
-            let token = rest.split(|c: char| c.is_whitespace() || c == ',').next().unwrap_or("");
+            let token = rest
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .next()
+                .unwrap_or("");
             if !token.is_empty() && !token.contains('.') {
                 out.push(token.to_string());
             }
@@ -865,11 +901,7 @@ fn python_simple_imports(text: &str) -> Vec<String> {
     out
 }
 
-fn collect_all_identifiers(
-    node: tree_sitter::Node,
-    source: &[u8],
-    out: &mut Vec<String>,
-) {
+fn collect_all_identifiers(node: tree_sitter::Node, source: &[u8], out: &mut Vec<String>) {
     let kind = node.kind();
     // Skip text-subtree kinds — same exclusion list as the renamers.
     if matches!(
@@ -1074,8 +1106,7 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         if let Some(parent) = abs.parent() {
             std::fs::create_dir_all(parent).ok();
         }
-        std::fs::write(&abs, text)
-            .with_context(|| format!("write {}", abs.display()))?;
+        std::fs::write(&abs, text).with_context(|| format!("write {}", abs.display()))?;
     }
 
     // Event-sourced model: the merge commit's two parents already
@@ -1198,11 +1229,17 @@ pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
         .to_string();
 
     if base_sha == head_sha {
-        eprintln!("llm-edit git-rebase: HEAD is already an ancestor of {} — nothing to rebase", onto);
+        eprintln!(
+            "llm-edit git-rebase: HEAD is already an ancestor of {} — nothing to rebase",
+            onto
+        );
         return Ok(0);
     }
     if base_sha == onto_sha {
-        eprintln!("llm-edit git-rebase: already up to date ({} merged into HEAD)", onto);
+        eprintln!(
+            "llm-edit git-rebase: already up to date ({} merged into HEAD)",
+            onto
+        );
         return Ok(0);
     }
 
@@ -1242,7 +1279,10 @@ pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
             eprintln!("llm-edit git-rebase: todo is empty after edit — nothing to do.");
             return Ok(0);
         }
-        if matches!(todo.first().map(|t| t.action), Some(TodoAction::Squash) | Some(TodoAction::Fixup)) {
+        if matches!(
+            todo.first().map(|t| t.action),
+            Some(TodoAction::Squash) | Some(TodoAction::Fixup)
+        ) {
             eprintln!(
                 "llm-edit git-rebase: the first todo entry cannot be 'squash' or 'fixup' — it needs a prior pick."
             );
@@ -1264,7 +1304,11 @@ pub fn run_git_rebase_ex(onto: &str, interactive: bool) -> Result<i32> {
                 }
                 TodoAction::Reword => {
                     let new_msg = run_editor_on_text(
-                        &format!("# Reword commit {}\n{}\n", &sha[..8.min(sha.len())], orig_msg),
+                        &format!(
+                            "# Reword commit {}\n{}\n",
+                            &sha[..8.min(sha.len())],
+                            orig_msg
+                        ),
                         ".git-rebase-reword.txt",
                     )?;
                     let new_msg = strip_comments(&new_msg);
@@ -1334,11 +1378,9 @@ pub fn run_git_rebase_continue() -> Result<i32> {
         let msg = git_cmd(&["log", "-1", "--format=%B", &state.rebase_head])?
             .trim_end_matches('\n')
             .to_string();
-        let new_commit = git_cmd(&[
-            "commit-tree", &tree_sha, "-p", &parent, "-m", &msg,
-        ])?
-        .trim()
-        .to_string();
+        let new_commit = git_cmd(&["commit-tree", &tree_sha, "-p", &parent, "-m", &msg])?
+            .trim()
+            .to_string();
         git_cmd(&["update-ref", "HEAD", &new_commit])?;
         state.rebase_head = new_commit;
         state.paused_for_edit = false;
@@ -1380,7 +1422,12 @@ fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str)
                 .trim_end_matches('\n')
                 .to_string();
             let new_commit = git_cmd(&[
-                "commit-tree", tree_sha, "-p", &state.rebase_head, "-m", &msg,
+                "commit-tree",
+                tree_sha,
+                "-p",
+                &state.rebase_head,
+                "-m",
+                &msg,
             ])?
             .trim()
             .to_string();
@@ -1391,7 +1438,12 @@ fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str)
         TodoAction::Reword => {
             let msg = entry.new_message.clone().unwrap_or_else(|| String::new());
             let new_commit = git_cmd(&[
-                "commit-tree", tree_sha, "-p", &state.rebase_head, "-m", &msg,
+                "commit-tree",
+                tree_sha,
+                "-p",
+                &state.rebase_head,
+                "-m",
+                &msg,
             ])?
             .trim()
             .to_string();
@@ -1407,11 +1459,9 @@ fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str)
                 .trim()
                 .to_string();
             let msg = entry.new_message.clone().unwrap_or_else(|| String::new());
-            let new_commit = git_cmd(&[
-                "commit-tree", tree_sha, "-p", &parent, "-m", &msg,
-            ])?
-            .trim()
-            .to_string();
+            let new_commit = git_cmd(&["commit-tree", tree_sha, "-p", &parent, "-m", &msg])?
+                .trim()
+                .to_string();
             git_cmd(&["update-ref", "HEAD", &new_commit])?;
             state.rebase_head = new_commit;
             Ok(())
@@ -1424,11 +1474,9 @@ fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str)
             let prior_msg = git_cmd(&["log", "-1", "--format=%B", &state.rebase_head])?
                 .trim_end_matches('\n')
                 .to_string();
-            let new_commit = git_cmd(&[
-                "commit-tree", tree_sha, "-p", &parent, "-m", &prior_msg,
-            ])?
-            .trim()
-            .to_string();
+            let new_commit = git_cmd(&["commit-tree", tree_sha, "-p", &parent, "-m", &prior_msg])?
+                .trim()
+                .to_string();
             git_cmd(&["update-ref", "HEAD", &new_commit])?;
             state.rebase_head = new_commit;
             Ok(())
@@ -1439,7 +1487,12 @@ fn apply_todo_action(state: &mut RebaseState, entry: &TodoEntry, tree_sha: &str)
                 .trim_end_matches('\n')
                 .to_string();
             let new_commit = git_cmd(&[
-                "commit-tree", tree_sha, "-p", &state.rebase_head, "-m", &msg,
+                "commit-tree",
+                tree_sha,
+                "-p",
+                &state.rebase_head,
+                "-m",
+                &msg,
             ])?
             .trim()
             .to_string();
@@ -1518,7 +1571,12 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
             .to_string();
 
         match rebase_step(&parent_sha, &state.rebase_head, &commit)? {
-            RebaseStep::Clean { mut tree, log, ast_merged_files, text_fallback_files } => {
+            RebaseStep::Clean {
+                mut tree,
+                log,
+                ast_merged_files,
+                text_fallback_files,
+            } => {
                 // Drop-awareness: for each path in drop_strip, if the
                 // merger output still matches the dropped commit's
                 // content (or is empty, meaning diff3 deleted it), drop
@@ -1622,10 +1680,7 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
                 // commit; just persist.
                 write_rebase_state(state)?;
 
-                eprintln!(
-                    "llm-edit git-rebase: conflict on {}: {}",
-                    short, reason
-                );
+                eprintln!("llm-edit git-rebase: conflict on {}: {}", short, reason);
                 if !conflict_files.is_empty() {
                     eprintln!(
                         "  Resolve these file(s): {}",
@@ -1679,8 +1734,8 @@ fn write_rebase_state(state: &RebaseState) -> Result<()> {
 
 fn read_rebase_state() -> Result<RebaseState> {
     let path = rebase_state_path()?;
-    let body = std::fs::read_to_string(&path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let body =
+        std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
     Ok(serde_json::from_str(&body)?)
 }
 
@@ -1698,7 +1753,12 @@ fn edit_todo(initial: Vec<TodoEntry>) -> Result<Vec<TodoEntry>> {
 
     let mut body = String::new();
     for e in &initial {
-        body.push_str(&format!("{} {} {}\n", e.action.as_str(), short_sha(&e.sha), e.subject));
+        body.push_str(&format!(
+            "{} {} {}\n",
+            e.action.as_str(),
+            short_sha(&e.sha),
+            e.subject
+        ));
     }
     body.push_str("\n# Commands:\n");
     body.push_str("#   p, pick   = use commit\n");
@@ -1733,15 +1793,23 @@ fn edit_todo(initial: Vec<TodoEntry>) -> Result<Vec<TodoEntry>> {
         let sha_tok = parts.next().unwrap_or("");
         let subject = parts.next().unwrap_or("").to_string();
         let action = TodoAction::parse(action_tok).ok_or_else(|| {
-            anyhow!("todo.txt line {}: unknown action {:?}", lineno + 1, action_tok)
+            anyhow!(
+                "todo.txt line {}: unknown action {:?}",
+                lineno + 1,
+                action_tok
+            )
         })?;
-        let original = by_short.get(sha_tok).ok_or_else(|| {
-            anyhow!("todo.txt line {}: unknown commit {:?}", lineno + 1, sha_tok)
-        })?;
+        let original = by_short
+            .get(sha_tok)
+            .ok_or_else(|| anyhow!("todo.txt line {}: unknown commit {:?}", lineno + 1, sha_tok))?;
         out.push(TodoEntry {
             action,
             sha: original.sha.clone(),
-            subject: if subject.is_empty() { original.subject.clone() } else { subject },
+            subject: if subject.is_empty() {
+                original.subject.clone()
+            } else {
+                subject
+            },
             new_message: None,
         });
     }
@@ -2075,12 +2143,12 @@ pub fn run_merge_driver(
     match merge_trees_and_ops(base_tree_source, &ours_ops, &theirs_ops)? {
         MergeResult::Merged { tree, log } => {
             // Write the requested file's merged content to %A.
-            let merged = tree
-                .get(rel_path)
-                .ok_or_else(|| anyhow!(
+            let merged = tree.get(rel_path).ok_or_else(|| {
+                anyhow!(
                     "merged tree missing {} (is the file covered by both sides?)",
                     rel_path.display()
-                ))?;
+                )
+            })?;
             std::fs::write(ours_path, merged)
                 .with_context(|| format!("write {}", ours_path.display()))?;
 
@@ -2102,14 +2170,19 @@ pub fn run_merge_driver(
                 body.push('\n');
             }
             std::fs::write(conflict_dir.join("conflicts.txt"), body)?;
-            eprintln!("llm-edit merge-driver: {} semantic conflict(s); see .llm-edit/conflicts.txt", reports.len());
+            eprintln!(
+                "llm-edit merge-driver: {} semantic conflict(s); see .llm-edit/conflicts.txt",
+                reports.len()
+            );
             Ok(1)
         }
     }
 }
 
 fn git_cmd(args: &[&str]) -> Result<String> {
-    let out = Command::new("git").args(args).output()
+    let out = Command::new("git")
+        .args(args)
+        .output()
         .with_context(|| format!("spawn git {}", args.join(" ")))?;
     if !out.status.success() {
         return Err(anyhow!(
@@ -2244,19 +2317,20 @@ mod parse_check_tests {
     fn python_unbalanced_brace_caught() {
         // Simulates the dogfood failure mode: a closing brace got
         // dropped by text-merge fallback.
-        let broken = "def commit():\n    if cond:\n        return 1\n# missing dedent / outer block";
+        let broken =
+            "def commit():\n    if cond:\n        return 1\n# missing dedent / outer block";
         // tree-sitter-python is very forgiving — try a more obviously
         // broken construct (mismatched paren).
-        assert!(!parses_cleanly(Path::new("foo.py"), "def f(:\n    return 1\n"));
+        assert!(!parses_cleanly(
+            Path::new("foo.py"),
+            "def f(:\n    return 1\n"
+        ));
         let _ = broken;
     }
 
     #[test]
     fn rust_clean() {
-        assert!(parses_cleanly(
-            Path::new("lib.rs"),
-            "fn x() -> i32 { 1 }\n"
-        ));
+        assert!(parses_cleanly(Path::new("lib.rs"), "fn x() -> i32 { 1 }\n"));
     }
 
     #[test]
@@ -2369,7 +2443,9 @@ mod tests {
 fn pending_op_file(op: &Op) -> Option<String> {
     match op {
         Op::RenameSymbol { file, .. } => Some(file.clone()),
-        Op::AddFile { file, .. } | Op::DeleteFile { file } | Op::ChangeSignature { file, .. } => Some(file.clone()),
+        Op::AddFile { file, .. } | Op::DeleteFile { file } | Op::ChangeSignature { file, .. } => {
+            Some(file.clone())
+        }
         Op::MoveFile { from, .. } => Some(from.clone()),
         Op::AddFunction { anchor, .. }
         | Op::DeleteFunction { anchor }
@@ -2382,9 +2458,10 @@ fn pending_op_file(op: &Op) -> Option<String> {
         | Op::AddRule { anchor, .. }
         | Op::RetypeBinding { anchor, .. }
         | Op::AddImport { anchor, .. }
-        | Op::SortBlock { anchor, .. } => {
-            anchor.get("file").and_then(|v| v.as_str()).map(|s| s.to_string())
-        }
+        | Op::SortBlock { anchor, .. } => anchor
+            .get("file")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         Op::RenameCssClass { .. } => None, // project-scoped, no single file
     }
 }

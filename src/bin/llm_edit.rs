@@ -12,7 +12,10 @@ use llm_edit::cli::{
 use serde_json::json;
 
 #[derive(Parser)]
-#[command(name = "llm-edit", about = "Record structured edits so merges are trivial.")]
+#[command(
+    name = "llm-edit",
+    about = "Record structured edits so merges are trivial."
+)]
 struct Args {
     /// Worktree directory to operate on (defaults to cwd).
     #[arg(long, global = true)]
@@ -249,14 +252,24 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| std::env::current_dir().expect("cwd"));
     // Non-apply subcommands that don't build a single op:
     match args.cmd {
-        Cmd::Merge { base, ours, theirs, output } => {
+        Cmd::Merge {
+            base,
+            ours,
+            theirs,
+            output,
+        } => {
             return merge_worktrees(&base, &ours, &theirs, &output);
         }
         Cmd::GitMerge { branch, no_commit } => {
             let code = run_git_merge(&branch, !no_commit)?;
             std::process::exit(code);
         }
-        Cmd::MergeDriver { base, ours, theirs, path } => {
+        Cmd::MergeDriver {
+            base,
+            ours,
+            theirs,
+            path,
+        } => {
             let code = run_merge_driver(&base, &ours, &theirs, &path)?;
             std::process::exit(code);
         }
@@ -265,23 +278,37 @@ fn main() -> Result<()> {
         }
         Cmd::Infer => {
             let (inferred, skipped) = run_infer()?;
-            println!("inferred {} op(s); {} file(s) had no detectable pattern", inferred, skipped);
+            println!(
+                "inferred {} op(s); {} file(s) had no detectable pattern",
+                inferred, skipped
+            );
             return Ok(());
         }
-        Cmd::GitRebase { onto, r#continue, abort, interactive } => {
+        Cmd::GitRebase {
+            onto,
+            r#continue,
+            abort,
+            interactive,
+        } => {
             let code = if abort {
                 llm_edit::cli::run_git_rebase_abort()?
             } else if r#continue {
                 llm_edit::cli::run_git_rebase_continue()?
             } else {
                 let onto = onto.ok_or_else(|| {
-                    anyhow::anyhow!("git-rebase: <onto> required when not using --continue / --abort")
+                    anyhow::anyhow!(
+                        "git-rebase: <onto> required when not using --continue / --abort"
+                    )
                 })?;
                 llm_edit::cli::run_git_rebase_ex(&onto, interactive)?
             };
             std::process::exit(code);
         }
-        Cmd::DeleteComment { file, fn_name, text } => {
+        Cmd::DeleteComment {
+            file,
+            fn_name,
+            text,
+        } => {
             return record_delete_comment(&cwd, &file, &fn_name, &text);
         }
         _ => {}
@@ -419,12 +446,30 @@ fn run_init(cwd: &Path) -> Result<()> {
     //    that call `llm-edit` (must be on PATH or LLM_EDIT_BIN set).
     let git_hooks = cwd.join(".git/hooks");
     if !git_hooks.is_dir() {
-        return Err(anyhow::anyhow!("not a git repo (no .git/hooks/). Run from a git working tree."));
+        return Err(anyhow::anyhow!(
+            "not a git repo (no .git/hooks/). Run from a git working tree."
+        ));
     }
-    write_hook(&git_hooks, "pre-commit", include_str!("../../hooks/pre-commit"))?;
-    write_hook(&git_hooks, "prepare-commit-msg", include_str!("../../hooks/prepare-commit-msg"))?;
-    write_hook(&git_hooks, "post-commit", include_str!("../../hooks/post-commit"))?;
-    write_hook(&git_hooks, "post-merge", include_str!("../../hooks/post-merge"))?;
+    write_hook(
+        &git_hooks,
+        "pre-commit",
+        include_str!("../../hooks/pre-commit"),
+    )?;
+    write_hook(
+        &git_hooks,
+        "prepare-commit-msg",
+        include_str!("../../hooks/prepare-commit-msg"),
+    )?;
+    write_hook(
+        &git_hooks,
+        "post-commit",
+        include_str!("../../hooks/post-commit"),
+    )?;
+    write_hook(
+        &git_hooks,
+        "post-merge",
+        include_str!("../../hooks/post-merge"),
+    )?;
     println!("  installed git hooks");
 
     // 3. Create the scratch directory (hooks expect it to exist).
@@ -441,9 +486,21 @@ fn run_init(cwd: &Path) -> Result<()> {
     }
     let claude_hooks = cwd.join(".claude/hooks");
     std::fs::create_dir_all(&claude_hooks)?;
-    write_hook(&claude_hooks, "llm-edit-pre.sh", include_str!("../../.claude/hooks/llm-edit-pre.sh"))?;
-    write_hook(&claude_hooks, "llm-edit-post.sh", include_str!("../../.claude/hooks/llm-edit-post.sh"))?;
-    write_hook(&claude_hooks, "llm-edit-bash.sh", include_str!("../../.claude/hooks/llm-edit-bash.sh"))?;
+    write_hook(
+        &claude_hooks,
+        "llm-edit-pre.sh",
+        include_str!("../../.claude/hooks/llm-edit-pre.sh"),
+    )?;
+    write_hook(
+        &claude_hooks,
+        "llm-edit-post.sh",
+        include_str!("../../.claude/hooks/llm-edit-post.sh"),
+    )?;
+    write_hook(
+        &claude_hooks,
+        "llm-edit-bash.sh",
+        include_str!("../../.claude/hooks/llm-edit-bash.sh"),
+    )?;
     let settings_path = cwd.join(".claude/settings.json");
     if !settings_path.exists() {
         std::fs::write(&settings_path, include_str!("../../.claude/settings.json"))?;

@@ -27,7 +27,9 @@
 
 use anyhow::{Context, Result, anyhow};
 use llm_edit::load_tree;
-use llm_edit::merge_logic::{MergeResult, compare_conflicts, compare_tree, merge_case, merge_trees_and_ops};
+use llm_edit::merge_logic::{
+    MergeResult, compare_conflicts, compare_tree, merge_case, merge_trees_and_ops,
+};
 use llm_edit::ops::{Op, parse_log};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -84,9 +86,7 @@ fn run() -> Result<bool> {
 pub fn run_at(root: &Path) -> Result<Option<BenchReport>> {
     let cases = discover_cases(root);
     if cases.is_empty() {
-        println!(
-            "(no benchmark corpus yet; build fixtures/benchmark/ before measuring)"
-        );
+        println!("(no benchmark corpus yet; build fixtures/benchmark/ before measuring)");
         return Ok(None);
     }
 
@@ -267,7 +267,10 @@ fn score_diff3_positive(case: &Path) -> Result<bool> {
         // Real diff3 conflict markers are at the start of a line; a
         // substring search would false-positive on prose mentioning
         // the literal character sequence.
-        if merged.lines().any(|l| l.starts_with("<<<<<<<") || l.starts_with(">>>>>>>")) {
+        if merged
+            .lines()
+            .any(|l| l.starts_with("<<<<<<<") || l.starts_with(">>>>>>>"))
+        {
             return Ok(false);
         }
         let want = fs::read_to_string(&ep).with_context(|| format!("read {}", ep.display()))?;
@@ -292,8 +295,7 @@ fn score_diff3_negative(case: &Path) -> Result<bool> {
             continue;
         }
         let (_code, merged) = diff3_merge(&ap, &bp, &bp2)?;
-        if merged.lines().any(|l| l.starts_with("<<<<<<<")) {
-        }
+        if merged.lines().any(|l| l.starts_with("<<<<<<<")) {}
     }
     Ok(false)
 }
@@ -376,7 +378,11 @@ fn print_table(buckets: &BTreeMap<String, Tally>, total: &Tally) -> Result<bool>
     let gap = l_pct - d_pct;
     let pass = gap >= 0.90;
     let sign = if gap >= 0.0 { "+" } else { "-" };
-    let badge = if pass { "\u{2705} PASS" } else { "\u{274C} FAIL" };
+    let badge = if pass {
+        "\u{2705} PASS"
+    } else {
+        "\u{274C} FAIL"
+    };
     println!(
         "{:<w$}  {:<8}   {:<8}   gap={}{:.2}  {}",
         "TOTAL",

@@ -32,7 +32,9 @@ struct CaseResult {
 fn main() -> Result<()> {
     let root = PathBuf::from("fixtures");
     if !root.exists() {
-        return Err(anyhow!("fixtures/ directory not found; run from project root"));
+        return Err(anyhow!(
+            "fixtures/ directory not found; run from project root"
+        ));
     }
 
     let cases = discover_cases(&root)?;
@@ -120,13 +122,7 @@ fn enumerate_files(roots: &[&PathBuf]) -> Result<Vec<PathBuf>> {
     Ok(set.into_iter().collect())
 }
 
-fn merge_one(
-    base: &Path,
-    a: &Path,
-    b: &Path,
-    expected: &Path,
-    rel: &Path,
-) -> Result<FileOutcome> {
+fn merge_one(base: &Path, a: &Path, b: &Path, expected: &Path, rel: &Path) -> Result<FileOutcome> {
     let bp = base.join(rel);
     let ap = a.join(rel);
     let bp2 = b.join(rel);
@@ -135,7 +131,12 @@ fn merge_one(
     // If file is missing on any side, diff3 can't handle it directly.
     // Report as Missing so we notice — we'll need per-side delete/add ops
     // when we build the structured merger.
-    for (name, p) in [("base", &bp), ("agent_a", &ap), ("agent_b", &bp2), ("expected", &ep)] {
+    for (name, p) in [
+        ("base", &bp),
+        ("agent_a", &ap),
+        ("agent_b", &bp2),
+        ("expected", &ep),
+    ] {
         if !p.exists() {
             return Ok(FileOutcome::Missing(name.to_string()));
         }
@@ -182,7 +183,12 @@ fn print_case(r: &CaseResult) {
                 continue;
             }
             FileOutcome::Missing(side) => {
-                println!("  {:<16} {}  (missing on {})", "MISSING", rel.display(), side);
+                println!(
+                    "  {:<16} {}  (missing on {})",
+                    "MISSING",
+                    rel.display(),
+                    side
+                );
                 continue;
             }
         };

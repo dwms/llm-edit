@@ -37,7 +37,7 @@ jobs:
           rustup target add ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --bin llm-edit --target ${{ matrix.target }}
+        run: cargo build --locked --release --bin llm-edit --bin lint_parse --target ${{ matrix.target }}
 
       - name: Package tarball
         id: pkg
@@ -48,7 +48,8 @@ jobs:
           name="llm-edit-${version}-${{ matrix.target }}"
           mkdir -p "dist/${name}"
           cp "target/${{ matrix.target }}/release/llm-edit" "dist/${name}/"
-          cp README.md LICENSE "dist/${name}/" 2>/dev/null || true
+          cp "target/${{ matrix.target }}/release/lint_parse" "dist/${name}/"
+          cp README.md LICENSE "dist/${name}/"
           tar -C dist -czf "dist/${name}.tar.gz" "${name}"
           sha=$(shasum -a 256 "dist/${name}.tar.gz" | awk '{print $1}')
           echo "tarball=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"

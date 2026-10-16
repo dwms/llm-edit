@@ -1,3 +1,10 @@
 /target/
 .llm-edit/conflicts.txt
 .llm-edit/log.jsonl
+
+/dist/
+.env
+.env.*
+!.env.example
+*.pem
+*.key

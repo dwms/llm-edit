@@ -16,8 +16,16 @@ fn main() -> Result<()> {
         if !entry.file_type().is_dir() {
             continue;
         }
-        let a = entry.path().join("agent_a").join(".llm-edit").join("log.jsonl");
-        let b = entry.path().join("agent_b").join(".llm-edit").join("log.jsonl");
+        let a = entry
+            .path()
+            .join("agent_a")
+            .join(".llm-edit")
+            .join("log.jsonl");
+        let b = entry
+            .path()
+            .join("agent_b")
+            .join(".llm-edit")
+            .join("log.jsonl");
         if a.exists() && b.exists() {
             cases.push(entry.path().to_path_buf());
         }
@@ -28,7 +36,11 @@ fn main() -> Result<()> {
     let mut ok = 0usize;
     for case in &cases {
         total += 1;
-        let rel = case.strip_prefix("fixtures").unwrap_or(case).display().to_string();
+        let rel = case
+            .strip_prefix("fixtures")
+            .unwrap_or(case)
+            .display()
+            .to_string();
         match check_case(case) {
             Ok(issues) if issues.is_empty() => {
                 ok += 1;
@@ -45,7 +57,10 @@ fn main() -> Result<()> {
     }
 
     println!();
-    println!("merger: {}/{} fixtures produced the expected outcome", ok, total);
+    println!(
+        "merger: {}/{} fixtures produced the expected outcome",
+        ok, total
+    );
     if ok != total {
         std::process::exit(1);
     }

@@ -60,11 +60,30 @@ The op vocabulary will grow over time
 ergonomic CLI subcommands above exist today, but `llm-edit apply
 --json '<op>'` is always an escape hatch.
 
+## Validation
+
+Run these before submitting changes:
+
+```sh
+cargo fmt --all -- --check
+cargo test --locked --all-targets
+cargo run --locked --release --bin bench
+```
+
+The benchmark command enforces its minimum improvement threshold. Keep the
+fixture directories intact: they contain intentional base/left/right/expected
+snapshots, including examples that are not standalone compilable projects.
+
 ## What `.llm-edit/` contains
 
-- `log.jsonl` — append-only record of every op an agent has recorded
-  on this branch. Tracked in git. Carried forward through merges by
-  the merge tool above.
-- `conflicts.txt` — written by the merge tool only when a semantic
-  conflict halts a merge. Not tracked in git (gitignored if it
-  appears).
+- `log.jsonl` is transient scratch space for pending operations, ignored by Git.
+  The commit-message hook embeds operations in commit bodies, then clears it.
+  Historical fixtures may contain tracked logs for compatibility tests.
+- `conflicts.txt` is an ignored report written when a semantic conflict stops a merge.
+
+## Repository layout
+
+- `src/`: merge engine, operation handling, and command-line tools.
+- `tests/` and fixture directories: integration tests and reproducible merge cases.
+- `hooks/` and `.claude/hooks/`: Git and optional editor integrations.
+- `homebrew/`: release formula template; the published tap is maintained separately.
