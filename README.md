@@ -188,11 +188,76 @@ result**, matching the expected fixture output. Standard text merging with
 incorrect result. These comparisons cover per-file text merging; other Git
 merge strategies and third-party semantic tools were not evaluated.
 
-| Scenario | Standard text merging: unresolved or incorrect | llm-edit: correctly resolved |
-| --- | --- | --- |
-| [Rename a function while another branch adds a caller](fixtures/benchmark/rename-refactor-vs-new-usage/py-rename-fn-vs-new-call) | Both commands produce conflicts | Propagates `square_root` → `sqrt` into the new `magnitude()` caller |
-| [Rename a CSS class across stylesheets while adding HTML](fixtures/benchmark/cross-file-ops/css-rename-3-css-files-vs-new-html) | Both commands merge `page.html` cleanly but leave the old class reference | Updates the HTML reference to match the renamed class |
-| [Sort imports while inserting another import](fixtures/benchmark/ordering-changes-vs-insert/py-sort-imports-vs-add-import-between) | Both commands produce conflicts | Preserves the new import in the expected sorted block |
+#### 1. Rename a function while another branch adds a new caller
+
+The project starts with a function named `square_root()`. One agent renames it
+to `sqrt()` and updates the existing callers. At the same time, another agent
+adds a new `magnitude()` function that still calls `square_root()`, because that
+was the name on its branch.
+
+**Standard text merging:** both tested commands produce a conflict. They compare
+changed lines without knowing that the rename should also apply to the new
+caller introduced on the other branch.
+
+**llm-edit:** carries the recorded rename into the other agent's addition. The
+merged project keeps the new function and uses `sqrt()` consistently:
+
+```python
+def sqrt(n):
+    return n ** 0.5
+
+
+def magnitude(v):
+    return sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+```
+
+[Inspect the complete rename fixture, including both branches and the expected result.](fixtures/benchmark/rename-refactor-vs-new-usage/py-rename-fn-vs-new-call)
+
+#### 2. Rename a CSS class while another branch adds HTML using the old name
+
+One agent renames `.tag` to `.label` across three stylesheets: `main.css`,
+`print.css`, and `dark.css`. Another agent adds this element to `page.html`:
+
+```html
+<span class="tag">Hello</span>
+```
+
+**Standard text merging:** both commands accept the HTML without a conflict,
+but leave `class="tag"` unchanged. The merged stylesheets define `.label`, so
+the new element no longer references the intended styles. A clean text merge
+has produced an inconsistent result across files.
+
+**llm-edit:** applies the recorded project-wide class rename to the new HTML as
+well as the stylesheets. It preserves the element and its content, with the
+correct class reference:
+
+```html
+<span class="label">Hello</span>
+```
+
+[Inspect the complete cross-file CSS/HTML fixture.](fixtures/benchmark/cross-file-ops/css-rename-3-css-files-vs-new-html)
+
+#### 3. Sort an import block while another branch adds an import
+
+The original Python file imports `zlib`, `base64`, and `pathlib` in that order.
+One agent alphabetizes the block. Another agent appends `import csv` to the
+original, unsorted block. Both changes are useful: keep the new dependency and
+keep the imports sorted.
+
+**Standard text merging:** both tested commands produce conflicts between the
+reordered lines and the insertion, leaving someone to reconcile the block.
+
+**llm-edit:** combines the recorded sort and insertion, preserving every import
+exactly once in the expected order:
+
+```python
+import base64
+import csv
+import pathlib
+import zlib
+```
+
+[Inspect the complete import-sorting fixture.](fixtures/benchmark/ordering-changes-vs-insert/py-sort-imports-vs-add-import-between)
 
 For example, inspect the rename conflict locally (exit status 1 is expected):
 
