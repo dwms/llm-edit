@@ -1,0 +1,12 @@
+bucket                        diff3      llm-edit
+----------------------------  --------   --------
+concurrent-convergent-edits   0/7        7/7     
+cross-file-ops                0/24       24/24   
+multi-merge                   0/25       25/25   
+ordering-changes-vs-insert    1/7        7/7     
+rename-refactor-vs-new-usage  0/22       22/22   
+structural-moves-vs-edit      4/16       16/16   
+true-conflicts                0/22       22/22   
+type-binding-changes-vs-use   0/5        5/5     
+----------------------------  --------   --------
+TOTAL                         5/128      128/128    gap=+0.96  ✅ PASS

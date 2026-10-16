@@ -17,8 +17,10 @@ llm-edit is **event-sourced version control on top of git**:
 3. Git history IS the op log — no external state to sync
 4. At merge time, the semantic merger compares ops instead of diffing text
 
-When two branches both rename the same symbol to different names, llm-edit produces a one-line conflict report (`rename_symbol_mismatch`) instead of a full-file diff3 conflict. The recorded rename-conflict example uses roughly 800 times fewer tokens;
-this is an illustrative estimate, not a general workload guarantee.
+When two branches both rename the same symbol to different names, llm-edit
+produces a structured conflict report (`rename_symbol_mismatch`). When a rename
+and a new caller are compatible, it propagates the rename into the new code.
+No LLM inference is used by the merge engine.
 
 For edits without recorded ops, llm-edit falls back to AST-aware 3-way merge (splits files into named items, merges per-item) which handles most disjoint-edit cases that plain diff3 can't.
 
@@ -145,21 +147,59 @@ feat: add validation helper
 
 The merger reads these via `git log --format=%B base..tip` — no files to sync, no state to lose.
 
-## Token savings
+## Merge results and token savings
 
-The fixture suite measures merge behavior; token counts below include estimates
-for larger files and are not a production workload benchmark. Run
-`cargo run --locked --release --bin bench` to reproduce the merge results.
+On the curated, recorded-operation fixtures, llm-edit produces the expected
+result in **81/81 compatible single merges**, compared with **5/81 for the
+per-file `diff3 -m` baseline**. That avoids a resolution step in 76 cases.
+These fixtures target semantic merge challenges; they do not estimate the
+success rate of ordinary merges in an arbitrary repository.
 
-Current merge benchmark and illustrative token estimates:
+| Metric | Reproduced result |
+| --- | ---: |
+| Compatible single merges: llm-edit / diff3 | 81/81 / 5/81 |
+| Additional cases resolved automatically | 76 (93.8% of this subset) |
+| Estimated LLM repair tokens avoided across those cases | 12,218 |
+| Estimated repair tokens avoided per additional resolution | 160 average |
+| LLM tokens used by llm-edit's merge engine | 0 |
 
-| Metric | Value |
-|---|---|
-| Fixtures passing expected merge behavior | 128/128 |
-| Fixtures passing with diff3 | 5/128 |
-| Estimated tokens saved per fixture (small files) | ~160 |
-| Estimated tokens saved for an 80KB file conflict | ~36,000 |
-| Reduction for recorded rename-vs-rename | ~800x |
+The token estimate counts text that a hypothetical LLM resolver would read and
+rewrite, using **characters / 4**, with integer rounding per fixture. It is not
+measured model usage or billing. It excludes prompts, retries, recording edits,
+and human review. Smaller prompts or a patch-based resolver can reduce the
+baseline cost. We do not claim a universal reduction factor.
+
+Reproduce both reports from the repository root:
+
+```sh
+cargo run --locked --release --bin bench
+cargo run --locked --release --bin token_savings
+```
+
+The full suite also checks 22 genuine conflicts and 25 chained merges; all
+128 expected outcomes pass. See [benchmark methodology and results](BENCHMARK.md)
+for the separate scoring rules and [raw token report](docs/benchmarks/token-savings.txt).
+
+### Scenarios text merging does not resolve correctly
+
+These examples were checked against both `diff3 -m` and `git merge-file -p`.
+They demonstrate per-file text merging, not every Git merge strategy or
+third-party semantic tool.
+
+| Scenario | Text-merge result | llm-edit result |
+| --- | --- | --- |
+| [Rename a function while another branch adds a caller](fixtures/benchmark/rename-refactor-vs-new-usage/py-rename-fn-vs-new-call) | Both commands produce conflicts | Propagates `square_root` → `sqrt` into the new `magnitude()` caller |
+| [Rename a CSS class across stylesheets while adding HTML](fixtures/benchmark/cross-file-ops/css-rename-3-css-files-vs-new-html) | Both commands merge `page.html` cleanly but leave the old class reference | Updates the HTML reference to match the renamed class |
+| [Sort imports while inserting another import](fixtures/benchmark/ordering-changes-vs-insert/py-sort-imports-vs-add-import-between) | Both commands produce conflicts | Preserves the new import in the expected sorted block |
+
+For example, inspect the rename conflict locally (exit status 1 is expected):
+
+```sh
+case_dir=fixtures/benchmark/rename-refactor-vs-new-usage/py-rename-fn-vs-new-call
+diff3 -m "$case_dir/agent_a/math.py" "$case_dir/base/math.py" "$case_dir/agent_b/math.py"
+git merge-file -p "$case_dir/agent_a/math.py" "$case_dir/base/math.py" "$case_dir/agent_b/math.py"
+# The expected semantic result is in "$case_dir/expected/math.py".
+```
 
 ## License
 
