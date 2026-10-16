@@ -180,13 +180,15 @@ The full suite also checks 22 genuine conflicts and 25 chained merges; all
 128 expected outcomes pass. See [benchmark methodology and results](BENCHMARK.md)
 for the separate scoring rules and [raw token report](docs/benchmarks/token-savings.txt).
 
-### Scenarios text merging does not resolve correctly
+### Scenarios llm-edit resolves correctly that standard text merging does not
 
-These examples were checked against both `diff3 -m` and `git merge-file -p`.
-They demonstrate per-file text merging, not every Git merge strategy or
-third-party semantic tool.
+In each example below, **llm-edit automatically produces the correct merged
+result**, matching the expected fixture output. Standard text merging with
+`diff3 -m` and `git merge-file -p` either leaves a conflict or accepts an
+incorrect result. These comparisons cover per-file text merging; other Git
+merge strategies and third-party semantic tools were not evaluated.
 
-| Scenario | Text-merge result | llm-edit result |
+| Scenario | Standard text merging: unresolved or incorrect | llm-edit: correctly resolved |
 | --- | --- | --- |
 | [Rename a function while another branch adds a caller](fixtures/benchmark/rename-refactor-vs-new-usage/py-rename-fn-vs-new-call) | Both commands produce conflicts | Propagates `square_root` → `sqrt` into the new `magnitude()` caller |
 | [Rename a CSS class across stylesheets while adding HTML](fixtures/benchmark/cross-file-ops/css-rename-3-css-files-vs-new-html) | Both commands merge `page.html` cleanly but leave the old class reference | Updates the HTML reference to match the renamed class |
