@@ -6,6 +6,9 @@ use anyhow::{Context, Result, anyhow};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::git_tree::{
+    Change, Entry, Plan, Snapshot, apply_plan, merge_entry, read_snapshot, write_blob,
+};
 use crate::merge_logic::{MergeResult, merge_trees_and_ops};
 use crate::ops::{Op, parse_log};
 use crate::{Tree, apply_log, load_tree};
@@ -970,9 +973,9 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         .trim()
         .to_string();
 
-    let base_tree_raw = git_extract_tree(&base_sha)?;
-    let ours_tree_raw = git_extract_tree(&ours_sha)?;
-    let theirs_tree_raw = git_extract_tree(&theirs_sha)?;
+    let base = read_snapshot(&base_sha)?;
+    let ours = read_snapshot(&ours_sha)?;
+    let theirs = read_snapshot(&theirs_sha)?;
 
     // Event-sourced ops: each commit's body carries the ops authored
     // by that commit in a fenced ```llm-edit-ops block. The cumulative
@@ -986,38 +989,18 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
     // (uncommitted edits the user staged). For the dogfood path we only
     // honor pending ops on the "ours" side since "theirs" is a
     // committed branch.
-    let log_path = PathBuf::from(".llm-edit/log.jsonl");
-    let pending_log = ours_tree_raw.get(&log_path).cloned().unwrap_or_default();
+    let pending_log = ours
+        .text
+        .get(Path::new(PENDING_LOG))
+        .cloned()
+        .unwrap_or_default();
     let pending_ops = parse_log(&pending_log)?;
     let ours_ops: Vec<Op> = ours_ops.into_iter().chain(pending_ops).collect();
 
-    let strip_meta = |tree: &Tree| -> Tree {
-        tree.iter()
-            .filter(|(p, _)| !p.starts_with(".llm-edit"))
-            .map(|(p, t)| (p.clone(), t.clone()))
-            .collect()
-    };
-    let base_tree = strip_meta(&base_tree_raw);
-    let ours_tree = strip_meta(&ours_tree_raw);
-    let theirs_tree = strip_meta(&theirs_tree_raw);
-
-    // Compute "what each side's tree SHOULD look like if the recorded
-    // ops were the only source of changes." Comparing this to the
-    // actual on-disk content tells us per file whether the side has
-    // unrecorded edits.
-    let mut expected_a = base_tree.clone();
-    let _ = apply_log(&mut expected_a, &ours_ops);
-    let mut expected_b = base_tree.clone();
-    let _ = apply_log(&mut expected_b, &theirs_ops);
-
-    // Run the semantic merger. Even when most files fall back to
-    // text, the semantic result is the source for ops-covered files
-    // AND its merged log carries forward.
-    let outcome = merge_trees_and_ops(base_tree.clone(), &ours_ops, &theirs_ops)?;
     let repo_root = repo_root()?;
-    let (semantic_tree, merged_log_ops) = match outcome {
-        MergeResult::Merged { tree, log } => (tree, log),
-        MergeResult::Conflicts(reports) => {
+    let merge = match plan_merge(&base, &ours, &theirs, &ours_ops, &theirs_ops)? {
+        Ok(merge) => merge,
+        Err(reports) => {
             let conflict_dir = repo_root.join(".llm-edit");
             std::fs::create_dir_all(&conflict_dir)?;
             let mut body = String::new();
@@ -1033,137 +1016,50 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
             return Ok(1);
         }
     };
-
-    // Per-file resolution.
-    let all_files: std::collections::BTreeSet<PathBuf> = base_tree
-        .keys()
-        .chain(ours_tree.keys())
-        .chain(theirs_tree.keys())
-        .cloned()
-        .collect();
-
-    let mut final_tree: Tree = Tree::new();
-    let mut text_conflicts: Vec<PathBuf> = Vec::new();
-    let mut ast_merged_files: Vec<PathBuf> = Vec::new();
-    let mut text_fallback_files: Vec<PathBuf> = Vec::new();
-
-    for path in &all_files {
-        let a_covered = expected_a.get(path) == ours_tree.get(path);
-        let b_covered = expected_b.get(path) == theirs_tree.get(path);
-
-        if a_covered && b_covered {
-            // Recorded ops describe both sides' changes for this file.
-            // Take the semantic merge result (which already has cross-
-            // op rewriting applied).
-            if let Some(content) = semantic_tree.get(path) {
-                final_tree.insert(path.clone(), content.clone());
-            }
-            continue;
-        }
-
-        // At least one side has unrecorded edits to this file. Try
-        // AST-aware merge first; fall back to diff3 if the language
-        // isn't supported. The semantic merger's op-log still gets
-        // persisted; cross-file propagation that was driven by ops
-        // still applied to OTHER files.
-        let base_c = base_tree.get(path).cloned().unwrap_or_default();
-        let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
-        let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
-
-        // Try AST-aware merge first: splits the file into named
-        // top-level items and merges per-item. Two branches editing
-        // different functions in the same file merge cleanly instead
-        // of colliding on interleaved lines. Falls back to diff3 when
-        // the language isn't supported or no named items are found.
-        let merged = match crate::ast_merge::ast_merge(path, &base_c, &ours_c, &theirs_c) {
-            crate::ast_merge::AstMergeResult::Clean(m) => {
-                ast_merged_files.push(path.clone());
-                m
-            }
-            crate::ast_merge::AstMergeResult::Conflict(m) => {
-                ast_merged_files.push(path.clone());
-                text_conflicts.push(path.clone());
-                final_tree.insert(path.clone(), m);
-                continue;
-            }
-            crate::ast_merge::AstMergeResult::NotApplicable => {
-                text_fallback_files.push(path.clone());
-                diff3_merge_strings(&ours_c, &base_c, &theirs_c)?
-            }
-        };
-
-        let has_markers = merged.lines().any(|l| l.starts_with("<<<<<<<"));
-        let parse_ok = parses_cleanly(path, &merged);
-        if has_markers || !parse_ok {
-            text_conflicts.push(path.clone());
-        }
-        final_tree.insert(path.clone(), merged);
-    }
-
-    // Write merged source.
-    for (rel, text) in &final_tree {
-        let abs = repo_root.join(rel);
-        if let Some(parent) = abs.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        std::fs::write(&abs, text).with_context(|| format!("write {}", abs.display()))?;
-    }
+    apply_plan(&merge.plan, &ours)?;
 
     // Event-sourced model: the merge commit's two parents already
     // anchor both sides' op history (`ops_in_range` walks them via git
-    // log). No need to write a denormalized cumulative log.jsonl into
-    // the merged tree. The merger's `merged_log_ops` are still useful
-    // for cross-file rewrites it applied to the tree, but the ops
-    // themselves are already in the parent commits' bodies.
-    let _ = &merged_log_ops; // future: surface in merge commit message
+    // log). The merger's log is still useful for cross-file rewrites
+    // it applied to the tree, but the ops themselves are already in
+    // the parent commits' bodies.
+    let _ = &merge.log; // future: surface in merge commit message
 
-    // Clear any stale pending ops staging file (it should already be
-    // empty if the workflow uses the prepare-commit-msg hook).
-    let abs_log = repo_root.join(".llm-edit/log.jsonl");
-    if abs_log.exists() {
-        std::fs::write(&abs_log, "")?;
-    }
-
-    git_cmd(&["add", "-A"])?;
-
-    if !ast_merged_files.is_empty() {
+    let list = |paths: &[PathBuf]| {
+        paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !merge.ast_merged_files.is_empty() {
         eprintln!(
             "llm-edit git-merge: {} file(s) AST-merged ({})",
-            ast_merged_files.len(),
-            ast_merged_files
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            merge.ast_merged_files.len(),
+            list(&merge.ast_merged_files)
         );
     }
-
-    if !text_fallback_files.is_empty() {
+    if !merge.text_fallback_files.is_empty() {
         eprintln!(
             "llm-edit git-merge: {} file(s) fell back to text merge ({})",
-            text_fallback_files.len(),
-            text_fallback_files
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            merge.text_fallback_files.len(),
+            list(&merge.text_fallback_files)
         );
     }
 
-    if !text_conflicts.is_empty() {
+    let git_dir = PathBuf::from(git_cmd(&["rev-parse", "--git-dir"])?.trim());
+    let msg = format!("Merge branch '{}'", branch);
+    if !merge.conflicts.is_empty() {
+        let paths: Vec<PathBuf> = merge.conflicts.iter().map(|(p, _)| p.clone()).collect();
         eprintln!(
-            "llm-edit git-merge: {} file(s) have unresolved text conflicts ({}); resolve and `git commit` manually",
-            text_conflicts.len(),
-            text_conflicts
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
+            "llm-edit git-merge: {} path(s) have unresolved conflicts ({}); resolve, `git add` them, and `git commit`",
+            paths.len(),
+            list(&paths)
         );
-        // Seed MERGE_HEAD anyway so a subsequent manual `git commit`
-        // produces a two-parent merge commit.
-        let git_dir = PathBuf::from(git_cmd(&["rev-parse", "--git-dir"])?.trim());
+        // Seed MERGE_HEAD so the manual `git commit` produces a
+        // two-parent merge commit.
         std::fs::write(git_dir.join("MERGE_HEAD"), format!("{}\n", theirs_sha))?;
+        std::fs::write(git_dir.join("MERGE_MSG"), format!("{}\n", msg))?;
         return Ok(1);
     }
 
@@ -1173,7 +1069,6 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         // back to a single-parent commit during dogfooding (#41); the
         // explicit commit-tree path bypasses that ambiguity.
         let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
-        let msg = format!("Merge branch '{}'", branch);
         let commit_sha = git_cmd(&[
             "commit-tree",
             &tree_sha,
@@ -1187,9 +1082,249 @@ pub fn run_git_merge(branch: &str, commit: bool) -> Result<i32> {
         .trim()
         .to_string();
         git_cmd(&["update-ref", "HEAD", &commit_sha])?;
+    } else {
+        std::fs::write(git_dir.join("MERGE_HEAD"), format!("{}\n", theirs_sha))?;
+        std::fs::write(git_dir.join("MERGE_MSG"), format!("{}\n", msg))?;
     }
 
     Ok(0)
+}
+
+/// Staging file for ops not yet folded into a commit body.
+const PENDING_LOG: &str = ".llm-edit/log.jsonl";
+
+/// A planned three-way merge of `base`, `ours` and `theirs`.
+struct MergePlan {
+    plan: Plan,
+    /// The semantic merger's op log.
+    log: Vec<Op>,
+    ast_merged_files: Vec<PathBuf>,
+    text_fallback_files: Vec<PathBuf>,
+    /// Conflicted paths, each with the reason.
+    conflicts: Vec<(PathBuf, String)>,
+}
+
+impl MergePlan {
+    fn conflict(
+        &mut self,
+        path: &Path,
+        stages: [Option<Entry>; 3],
+        worktree: Option<String>,
+        reason: String,
+    ) {
+        self.conflicts.push((path.to_path_buf(), reason));
+        self.plan
+            .insert(path.to_path_buf(), Change::Conflict { stages, worktree });
+    }
+}
+
+/// Plan the hybrid merge shared by `git-merge` and `git-rebase`.
+///
+/// Text files go through the semantic merger where the recorded ops
+/// cover both sides' changes, and through AST-aware or `diff3` merging
+/// where they don't. Everything else in the tree (submodule pointers,
+/// symlinks, binaries) and deletions merge per entry. `.llm-edit/`
+/// metadata keeps ours, except that the pending-op log is cleared:
+/// its ops are folded into the merge.
+///
+/// Returns `Err` with the reports when the semantic merger conflicts.
+fn plan_merge(
+    base: &Snapshot,
+    ours: &Snapshot,
+    theirs: &Snapshot,
+    ours_ops: &[Op],
+    theirs_ops: &[Op],
+) -> Result<std::result::Result<MergePlan, Vec<crate::merge_logic::ConflictReport>>> {
+    let is_meta = |p: &Path| p.starts_with(".llm-edit");
+    let strip_meta = |t: &Tree| -> Tree {
+        t.iter()
+            .filter(|(p, _)| !is_meta(p))
+            .map(|(p, t)| (p.clone(), t.clone()))
+            .collect()
+    };
+    let base_tree = strip_meta(&base.text);
+    let ours_tree = strip_meta(&ours.text);
+    let theirs_tree = strip_meta(&theirs.text);
+
+    // Compute "what each side's tree SHOULD look like if the recorded
+    // ops were the only source of changes." Comparing this to the
+    // actual content tells us per file whether the side has unrecorded
+    // edits.
+    let mut expected_a = base_tree.clone();
+    let _ = apply_log(&mut expected_a, ours_ops);
+    let mut expected_b = base_tree.clone();
+    let _ = apply_log(&mut expected_b, theirs_ops);
+
+    // Run the semantic merger. Even when most files fall back to
+    // text, the semantic result is the source for ops-covered files.
+    let (semantic_tree, log) = match merge_trees_and_ops(base_tree.clone(), ours_ops, theirs_ops)? {
+        MergeResult::Merged { tree, log } => (tree, log),
+        MergeResult::Conflicts(reports) => return Ok(Err(reports)),
+    };
+
+    let mut out = MergePlan {
+        plan: Plan::new(),
+        log,
+        ast_merged_files: Vec::new(),
+        text_fallback_files: Vec::new(),
+        conflicts: Vec::new(),
+    };
+    let paths: std::collections::BTreeSet<&PathBuf> = base
+        .entries
+        .keys()
+        .chain(ours.entries.keys())
+        .chain(theirs.entries.keys())
+        .filter(|p| !is_meta(p))
+        .collect();
+
+    for path in paths {
+        let (b, o, t) = (
+            base.entries.get(path),
+            ours.entries.get(path),
+            theirs.entries.get(path),
+        );
+        let stages = [b.cloned(), o.cloned(), t.cloned()];
+
+        let is_text = |e: Option<&Entry>, tree: &Tree| e.is_none() || tree.contains_key(path);
+        let all_text = is_text(b, &base_tree) && is_text(o, &ours_tree) && is_text(t, &theirs_tree);
+        // Content git can't merge as text, and deletions, merge per
+        // entry. A file added on one side still goes through the text
+        // path below, so ops from the other side propagate into it.
+        if !all_text || (b.is_some() && (o.is_none() || t.is_none())) {
+            match merge_entry(b, o, t) {
+                Some(Change::Conflict { .. }) => {
+                    // Modify/delete: leave the surviving edit on disk.
+                    let worktree = o
+                        .is_none()
+                        .then(|| theirs_tree.get(path).cloned())
+                        .flatten();
+                    out.conflict(
+                        path,
+                        stages,
+                        worktree,
+                        format!("{} (changed on both sides)", path.display()),
+                    );
+                }
+                Some(change) => {
+                    out.plan.insert(path.clone(), change);
+                }
+                None => {}
+            }
+            continue;
+        }
+
+        let a_covered = expected_a.get(path) == ours_tree.get(path);
+        let b_covered = expected_b.get(path) == theirs_tree.get(path);
+        let base_c = base_tree.get(path).cloned().unwrap_or_default();
+        let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
+        let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
+        let merged = if a_covered && b_covered {
+            // Recorded ops describe both sides' changes for this file.
+            // Take the semantic merge result (which already has cross-
+            // op rewriting applied).
+            match semantic_tree.get(path) {
+                Some(content) => content.clone(),
+                None => continue,
+            }
+        } else if ours_c == base_c {
+            // Only theirs changed the file: the merge is theirs. No
+            // merger runs, so none can rewrite content one side left
+            // untouched.
+            theirs_c.clone()
+        } else if theirs_c == base_c || theirs_c == ours_c {
+            ours_c.clone()
+        } else {
+            // Both sides changed the file and at least one has
+            // unrecorded edits. Try AST-aware merge first: splits the
+            // file into named top-level items and merges per-item, so
+            // two branches editing different functions in the same
+            // file merge cleanly. Falls back to diff3 when the language isn't
+            // supported or no named items are found.
+            match crate::ast_merge::ast_merge(path, &base_c, &ours_c, &theirs_c) {
+                crate::ast_merge::AstMergeResult::Clean(m) => {
+                    out.ast_merged_files.push(path.clone());
+                    m
+                }
+                crate::ast_merge::AstMergeResult::Conflict(m) => {
+                    out.ast_merged_files.push(path.clone());
+                    out.conflict(
+                        path,
+                        stages,
+                        Some(m),
+                        format!("{} (AST per-item conflict)", path.display()),
+                    );
+                    continue;
+                }
+                crate::ast_merge::AstMergeResult::NotApplicable => {
+                    out.text_fallback_files.push(path.clone());
+                    diff3_merge_strings(&ours_c, &base_c, &theirs_c)?
+                }
+            }
+        };
+
+        let has_markers = merged.lines().any(|l| l.starts_with("<<<<<<<"));
+        // A parse failure only counts against the merge when both
+        // inputs parsed: a file that was already unparseable (HTML
+        // fixtures, minified or generated code) isn't a merge artifact.
+        let parse_ok = parses_cleanly(path, &merged)
+            || !(parses_cleanly(path, &ours_c) && parses_cleanly(path, &theirs_c));
+        if has_markers || !parse_ok {
+            out.conflict(
+                path,
+                stages,
+                Some(merged),
+                format!(
+                    "{} (markers={}, parse_ok={})",
+                    path.display(),
+                    has_markers,
+                    parse_ok
+                ),
+            );
+            continue;
+        }
+
+        let mode = |e: Option<&Entry>| e.map(|e| e.mode.clone());
+        let (bm, om, tm) = (mode(b), mode(o), mode(t));
+        let mode = if om == tm || tm == bm {
+            om
+        } else if om == bm {
+            tm
+        } else {
+            out.conflict(
+                path,
+                stages,
+                Some(merged),
+                format!("{} (mode changed on both sides)", path.display()),
+            );
+            continue;
+        };
+        let mode = mode.expect("a text path is present on ours or theirs");
+        let oid = match o {
+            Some(o) if merged == ours_c => o.oid.clone(),
+            _ => write_blob(&merged)?,
+        };
+        let entry = Entry { mode, oid };
+        if o != Some(&entry) {
+            out.plan.insert(path.clone(), Change::Set(entry));
+        }
+    }
+
+    // The pending ops are part of this merge; clear the staging file.
+    if let Some(log) = ours.entries.get(Path::new(PENDING_LOG))
+        && !ours
+            .text
+            .get(Path::new(PENDING_LOG))
+            .is_some_and(|s| s.is_empty())
+    {
+        out.plan.insert(
+            PathBuf::from(PENDING_LOG),
+            Change::Set(Entry {
+                mode: log.mode.clone(),
+                oid: write_blob("")?,
+            }),
+        );
+    }
+    Ok(Ok(out))
 }
 
 /// Replay every commit on the current branch (between `merge-base(HEAD, onto)`
@@ -1369,8 +1504,9 @@ pub fn run_git_rebase_continue() -> Result<i32> {
         // The user may have edited files after the `edit` pause. Amend
         // `rebase_head` (which is the commit created by the edit step)
         // by re-creating it with the same parent + message but a new tree
-        // built from whatever's on disk now.
-        git_cmd(&["add", "-A"])?;
+        // built from the tracked files on disk now (new files must be
+        // `git add`ed, as with `git rebase --continue`).
+        git_cmd(&["add", "-u"])?;
         let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
         let parent = git_cmd(&["rev-parse", &format!("{}^", state.rebase_head)])?
             .trim()
@@ -1395,10 +1531,10 @@ pub fn run_git_rebase_continue() -> Result<i32> {
     }
 
     // The failing entry — user has resolved the tree on disk. Stage
-    // everything, build the resolved tree, and land it according to
-    // the failing entry's action.
+    // the tracked files (which resolves the unmerged paths), build the
+    // resolved tree, and land it according to the failing entry's action.
     let failing = state.todo[0].clone();
-    git_cmd(&["add", "-A"])?;
+    git_cmd(&["add", "-u"])?;
     let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
     apply_todo_action(&mut state, &failing, &tree_sha)?;
     state.todo.remove(0);
@@ -1550,11 +1686,11 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
         // let diff3 reintroduce them).
         if entry.action == TodoAction::Drop {
             eprintln!("  [{}] drop", short);
-            let dropped_tree = git_extract_tree(&commit)?;
+            let dropped_tree = read_snapshot(&commit)?.text;
             let parent_sha = git_cmd(&["rev-parse", &format!("{}^", commit)])?
                 .trim()
                 .to_string();
-            let parent_tree = git_extract_tree(&parent_sha)?;
+            let parent_tree = read_snapshot(&parent_sha)?.text;
             for (path, content) in &dropped_tree {
                 if parent_tree.get(path) != Some(content) {
                     let rel = path.to_string_lossy().to_string();
@@ -1570,17 +1706,18 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
             .trim()
             .to_string();
 
-        match rebase_step(&parent_sha, &state.rebase_head, &commit)? {
+        let ours = read_snapshot(&state.rebase_head)?;
+        match rebase_step(&parent_sha, &state.rebase_head, &ours, &commit)? {
             RebaseStep::Clean {
-                mut tree,
+                mut plan,
                 log,
                 ast_merged_files,
                 text_fallback_files,
             } => {
                 // Drop-awareness: for each path in drop_strip, if the
-                // merger output still matches the dropped commit's
-                // content (or is empty, meaning diff3 deleted it), drop
-                // the path from the tree. If the content differs, the
+                // merged content still matches the dropped commit's
+                // content (or is empty, meaning diff3 deleted it), keep
+                // ours for the path. If the content differs, the
                 // current commit modified the file — honor that and
                 // remove the path from the strip map.
                 if !state.drop_strip.is_empty() {
@@ -1588,14 +1725,18 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
                     for rel in keys {
                         let path = PathBuf::from(&rel);
                         let expected = state.drop_strip.get(&rel).cloned().unwrap_or_default();
-                        match tree.get(&path) {
-                            Some(content) if content == &expected || content.is_empty() => {
-                                tree.remove(&path);
+                        let merged = match plan.get(&path) {
+                            Some(Change::Set(e)) => Some(e.oid.clone()),
+                            Some(_) => None,
+                            None => ours.entries.get(&path).map(|e| e.oid.clone()),
+                        };
+                        match merged {
+                            Some(oid)
+                                if oid == write_blob(&expected)? || oid == write_blob("")? =>
+                            {
+                                plan.remove(&path);
                             }
-                            Some(_) => {
-                                state.drop_strip.remove(&rel);
-                            }
-                            None => {
+                            _ => {
                                 state.drop_strip.remove(&rel);
                             }
                         }
@@ -1617,23 +1758,11 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
                 }
                 eprintln!("  [{}] {}{}", short, entry.action.as_str(), suffix);
                 git_cmd(&["read-tree", "--reset", "-u", &state.rebase_head])?;
-                let repo_root = repo_root()?;
-                for (rel, content) in &tree {
-                    let abs = repo_root.join(rel);
-                    if let Some(parent) = abs.parent() {
-                        std::fs::create_dir_all(parent).ok();
-                    }
-                    std::fs::write(&abs, content)?;
-                }
                 // Event-sourced model: ops live in commit bodies, not
-                // in a denormalized log.jsonl. Clear any stale staging.
+                // in a denormalized log.jsonl; the plan clears any
+                // stale staging.
                 let _ = &log;
-                let abs_log = repo_root.join(".llm-edit/log.jsonl");
-                if abs_log.exists() {
-                    std::fs::write(&abs_log, "")?;
-                }
-
-                git_cmd(&["add", "-A"])?;
+                apply_plan(&plan, &ours)?;
                 let tree_sha = git_cmd(&["write-tree"])?.trim().to_string();
                 apply_todo_action(state, &entry, &tree_sha)?;
                 state.todo.remove(0);
@@ -1658,23 +1787,16 @@ fn rebase_loop(state: &mut RebaseState) -> Result<i32> {
             }
             RebaseStep::Conflict {
                 reason,
-                partial_tree,
+                partial_plan,
                 conflict_files,
             } => {
-                // Materialize what we can onto disk so the user has
-                // something to resolve. If we don't have a partial
-                // tree (pre-tree semantic conflict), fall back to the
-                // rebase_head state so the user can at least inspect.
+                // Materialize what we can so the user has something to
+                // resolve. If we don't have a partial merge (pre-tree
+                // semantic conflict), fall back to the rebase_head
+                // state so the user can at least inspect.
                 git_cmd(&["read-tree", "--reset", "-u", &state.rebase_head])?;
-                let repo_root = repo_root()?;
-                if let Some(tree) = &partial_tree {
-                    for (rel, content) in tree {
-                        let abs = repo_root.join(rel);
-                        if let Some(parent) = abs.parent() {
-                            std::fs::create_dir_all(parent).ok();
-                        }
-                        std::fs::write(&abs, content)?;
-                    }
+                if let Some(plan) = &partial_plan {
+                    apply_plan(plan, &ours)?;
                 }
                 // State already has commits_remaining[0] == failing
                 // commit; just persist.
@@ -1890,57 +2012,44 @@ fn remove_rebase_state() -> Result<()> {
 
 enum RebaseStep {
     Clean {
-        tree: Tree,
+        plan: Plan,
         log: Vec<Op>,
         ast_merged_files: Vec<PathBuf>,
         text_fallback_files: Vec<PathBuf>,
     },
     Conflict {
         reason: String,
-        /// Partial merged tree — non-conflicted files resolved cleanly,
-        /// conflicted files contain diff3 output (possibly with markers).
-        /// None on a pre-tree semantic conflict where we can't build a
-        /// useful partial tree.
-        partial_tree: Option<Tree>,
-        /// Files whose diff3 output didn't parse cleanly or carried
-        /// conflict markers — the user needs to edit these.
+        /// Partial merge — non-conflicted paths resolved cleanly,
+        /// conflicted paths unmerged with diff3 output (possibly with
+        /// markers) on disk. None on a pre-tree semantic conflict where
+        /// we can't build a useful partial merge.
+        partial_plan: Option<Plan>,
+        /// Paths the user needs to resolve.
         conflict_files: Vec<PathBuf>,
     },
 }
 
 /// One rebase step: hybrid-merge `theirs` (the commit being replayed)
 /// into `ours` (the in-progress rebase tip) on top of `base` (theirs's
-/// original parent). Mirrors `run_git_merge`'s hybrid logic but
-/// without committing — caller does that.
-fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<RebaseStep> {
-    let base_tree_raw = git_extract_tree(base_sha)?;
-    let ours_tree_raw = git_extract_tree(ours_sha)?;
-    let theirs_tree_raw = git_extract_tree(theirs_sha)?;
+/// original parent). Same merge as `run_git_merge`, but without
+/// committing — caller does that.
+fn rebase_step(
+    base_sha: &str,
+    ours_sha: &str,
+    ours: &Snapshot,
+    theirs_sha: &str,
+) -> Result<RebaseStep> {
+    let base = read_snapshot(base_sha)?;
+    let theirs = read_snapshot(theirs_sha)?;
 
     // Event-sourced: ops come from commit bodies in base..ours and
     // base..theirs.
     let ours_ops = ops_in_range(base_sha, ours_sha)?;
     let theirs_ops = ops_in_range(base_sha, theirs_sha)?;
 
-    let strip_meta = |t: &Tree| -> Tree {
-        t.iter()
-            .filter(|(p, _)| !p.starts_with(".llm-edit"))
-            .map(|(p, t)| (p.clone(), t.clone()))
-            .collect()
-    };
-    let base_tree = strip_meta(&base_tree_raw);
-    let ours_tree = strip_meta(&ours_tree_raw);
-    let theirs_tree = strip_meta(&theirs_tree_raw);
-
-    let mut expected_a = base_tree.clone();
-    let _ = apply_log(&mut expected_a, &ours_ops);
-    let mut expected_b = base_tree.clone();
-    let _ = apply_log(&mut expected_b, &theirs_ops);
-
-    let outcome = merge_trees_and_ops(base_tree.clone(), &ours_ops, &theirs_ops)?;
-    let (semantic_tree, merged_log_ops) = match outcome {
-        MergeResult::Merged { tree, log } => (tree, log),
-        MergeResult::Conflicts(reports) => {
+    let merge = match plan_merge(&base, ours, &theirs, &ours_ops, &theirs_ops)? {
+        Ok(merge) => merge,
+        Err(reports) => {
             return Ok(RebaseStep::Conflict {
                 reason: format!(
                     "{} semantic conflict(s): {}",
@@ -1951,85 +2060,27 @@ fn rebase_step(base_sha: &str, ours_sha: &str, theirs_sha: &str) -> Result<Rebas
                         .collect::<Vec<_>>()
                         .join(", ")
                 ),
-                partial_tree: None,
+                partial_plan: None,
                 conflict_files: Vec::new(),
             });
         }
     };
 
-    let all_files: std::collections::BTreeSet<PathBuf> = base_tree
-        .keys()
-        .chain(ours_tree.keys())
-        .chain(theirs_tree.keys())
-        .cloned()
-        .collect();
-
-    let mut final_tree: Tree = Tree::new();
-    let mut ast_merged_files: Vec<PathBuf> = Vec::new();
-    let mut text_fallback_files: Vec<PathBuf> = Vec::new();
-    let mut conflict_files: Vec<PathBuf> = Vec::new();
-    let mut conflict_reasons: Vec<String> = Vec::new();
-
-    for path in &all_files {
-        let a_covered = expected_a.get(path) == ours_tree.get(path);
-        let b_covered = expected_b.get(path) == theirs_tree.get(path);
-
-        if a_covered && b_covered {
-            if let Some(content) = semantic_tree.get(path) {
-                final_tree.insert(path.clone(), content.clone());
-            }
-            continue;
-        }
-
-        let base_c = base_tree.get(path).cloned().unwrap_or_default();
-        let ours_c = ours_tree.get(path).cloned().unwrap_or_default();
-        let theirs_c = theirs_tree.get(path).cloned().unwrap_or_default();
-        let merged = match crate::ast_merge::ast_merge(path, &base_c, &ours_c, &theirs_c) {
-            crate::ast_merge::AstMergeResult::Clean(m) => {
-                ast_merged_files.push(path.clone());
-                m
-            }
-            crate::ast_merge::AstMergeResult::Conflict(m) => {
-                ast_merged_files.push(path.clone());
-                conflict_files.push(path.clone());
-                conflict_reasons.push(format!("{} (AST per-item conflict)", path.display()));
-                final_tree.insert(path.clone(), m);
-                continue;
-            }
-            crate::ast_merge::AstMergeResult::NotApplicable => {
-                text_fallback_files.push(path.clone());
-                diff3_merge_strings(&ours_c, &base_c, &theirs_c)?
-            }
-        };
-        let has_markers = merged.lines().any(|l| l.starts_with("<<<<<<<"));
-        let parse_ok = parses_cleanly(path, &merged);
-        if has_markers || !parse_ok {
-            conflict_files.push(path.clone());
-            conflict_reasons.push(format!(
-                "{} (markers={}, parse_ok={})",
-                path.display(),
-                has_markers,
-                parse_ok
-            ));
-        }
-        // Always insert the diff3 output — the caller materializes this
-        // to the working tree so the user has something to resolve.
-        final_tree.insert(path.clone(), merged);
-    }
-
-    if !conflict_files.is_empty() {
+    if !merge.conflicts.is_empty() {
+        let (conflict_files, reasons): (Vec<PathBuf>, Vec<String>) =
+            merge.conflicts.into_iter().unzip();
         return Ok(RebaseStep::Conflict {
-            reason: format!("text-fallback conflict(s): {}", conflict_reasons.join(", ")),
-            partial_tree: Some(final_tree),
+            reason: format!("text-fallback conflict(s): {}", reasons.join(", ")),
+            partial_plan: Some(merge.plan),
             conflict_files,
         });
     }
 
     Ok(RebaseStep::Clean {
-        tree: final_tree,
-        log: merged_log_ops,
-        ast_merged_files,
-        text_fallback_files,
+        plan: merge.plan,
+        log: merge.log,
+        ast_merged_files: merge.ast_merged_files,
+        text_fallback_files: merge.text_fallback_files,
     })
 }
 
@@ -2125,9 +2176,7 @@ pub fn run_merge_driver(
         .trim()
         .to_string();
 
-    let base_tree = git_extract_tree(&base_sha)?;
-    let _ours_tree = git_extract_tree(&ours_sha)?;
-    let _theirs_tree = git_extract_tree(&theirs_sha)?;
+    let base_tree = read_snapshot(&base_sha)?.text;
 
     // Event-sourced ops: walk commit bodies in base..ours and base..theirs.
     let ours_ops = ops_in_range(&base_sha, &ours_sha)?;
@@ -2179,7 +2228,7 @@ pub fn run_merge_driver(
     }
 }
 
-fn git_cmd(args: &[&str]) -> Result<String> {
+pub(crate) fn git_cmd(args: &[&str]) -> Result<String> {
     let out = Command::new("git")
         .args(args)
         .output()
@@ -2210,21 +2259,6 @@ fn read_merge_head() -> Result<String> {
 fn repo_root() -> Result<PathBuf> {
     let s = git_cmd(&["rev-parse", "--show-toplevel"])?;
     Ok(PathBuf::from(s.trim()))
-}
-
-/// Extract every file at a given git ref into an in-memory Tree.
-fn git_extract_tree(sha: &str) -> Result<Tree> {
-    let listing = git_cmd(&["ls-tree", "-r", "--name-only", sha])?;
-    let mut tree = Tree::new();
-    for line in listing.lines() {
-        let path = line.trim();
-        if path.is_empty() {
-            continue;
-        }
-        let content = git_cmd(&["show", &format!("{}:{}", sha, path)])?;
-        tree.insert(PathBuf::from(path), content);
-    }
-    Ok(tree)
 }
 
 fn append_op_to_log(cwd: &Path, op_json: &str) -> Result<()> {
